@@ -71,11 +71,13 @@ header {
 }
 .brand { display: flex; align-items: center; gap: 11px; }
 .brand-mark {
-  width: 34px; height: 34px; border-radius: 9px; background: var(--grad); flex: none;
+  width: 34px; height: 34px; border-radius: 9px; flex: none;
   display: grid; place-items: center; overflow: hidden;
-  box-shadow: inset 0 0 0 .5px rgba(255,255,255,.25), 0 4px 14px rgba(162, 89, 255, .35);
+  background: radial-gradient(circle at 50% 44%, #30184f 0%, #160d24 55%, #0a080f 100%);
+  box-shadow: inset 0 0 0 .5px rgba(255,255,255,.16), 0 4px 14px rgba(0,0,0,.45), 0 0 16px rgba(162,89,255,.16);
 }
-.brand-mark .eye { width: 29px; }
+.brand-mark .eye { width: 30px; }
+.brand-mark .eye-fill { fill: #e6def4; }
 .brand-text { display: flex; flex-direction: column; line-height: 1.05; }
 .brand-text b { font-size: 15.5px; font-weight: 700; letter-spacing: -.02em; }
 .brand-text span {
@@ -541,7 +543,8 @@ function eyeSVG(id, { r = 210, blur = 26, ring = false } = {}) {
   <use href="#eyePath" class="eye-fill" filter="url(#${id}b)" mask="url(#${id}mi)"/>
   ${ring ? `<circle class="lens lens-ring" cx="600" cy="320" r="${Math.round(r * 0.78)}"/>` : ""}</svg>`;
 }
-$("brandEye").innerHTML = eyeSVG("hd", { r: 260, blur: 38 });
+// маленький значок в шапке — статичный и чёткий; линза живёт только на большом логотипе
+$("brandEye").innerHTML = `<svg class="eye" viewBox="-24 -24 1312 628" aria-hidden="true"><use href="#eyePath" class="eye-fill"/></svg>`;
 $("heroEye").innerHTML = eyeSVG("he", { r: 200, blur: 24, ring: true });
 
 // линза цензуры ездит по глазу и замирает на зрачке; один таймер на все части, чтобы не разъезжались

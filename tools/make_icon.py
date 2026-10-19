@@ -12,15 +12,18 @@ from PIL import Image, ImageDraw, ImageFilter
 
 ROOT = Path(__file__).resolve().parent.parent
 LOGO = Image.open(ROOT / "assets" / "logo.png").getchannel("A")
-SIZES = [16, 24, 32, 48, 64, 128, 256]
+# все размеры, которые Windows берёт при разных масштабах экрана (100–300%)
+SIZES = [16, 20, 24, 32, 40, 48, 64, 72, 80, 96, 128, 256]
 
 VARIANTS = {
-    # тёмная плитка, белый глаз, свечение бренда
+    # тёмная плитка, белый глаз, сильное свечение бренда
     "glow": dict(bg=((58, 26, 98), (24, 13, 40), (10, 8, 16)), eye="white", glow=1.0),
-    # тёмная плитка, глаз в градиенте бренда
-    "gradient": dict(bg=((44, 22, 74), (20, 12, 34), (9, 7, 14)), eye="grad", glow=0.8),
-    # насыщенная, но заметно темнее прежней
-    "deep": dict(bg=((92, 38, 168), (70, 22, 104), (46, 12, 60)), eye="white", glow=0.55),
+    # то же, но свечение еле заметное и глаз чуть приглушён
+    "soft": dict(bg=((48, 24, 80), (22, 13, 36), (10, 8, 15)), eye=(226, 219, 240), glow=0.28),
+    # глаз пыльно-лавандовый с розовым, свечения почти нет
+    "muted": dict(bg=((40, 22, 64), (20, 12, 31), (10, 8, 14)), eye=((170, 146, 214), (212, 150, 188)), glow=0.12),
+    # совсем спокойный: нейтральная тёмная плитка, светло-серый глаз, без свечения
+    "mono": dict(bg=((38, 32, 50), (21, 18, 28), (11, 10, 15)), eye=(196, 188, 212), glow=0),
 }
 
 
@@ -36,15 +39,16 @@ def eye_alpha(width, dilate=0):
     return a
 
 
-def brand_gradient(w, h, alpha=255):
+def brand_gradient(w, h, c1=(176, 108, 255), c2=(255, 102, 176)):
     t = np.linspace(0, 1, w)[None, :, None]
-    rgb = lerp((176, 108, 255), (255, 102, 176), t) * np.ones((h, 1, 1))
+    rgb = lerp(c1, c2, t) * np.ones((h, 1, 1))
     im = Image.fromarray(rgb.astype(np.uint8)).convert("RGBA")
     return im
 
 
 def tile(size, v):
-    ss = 4 if size < 128 else 2
+    # рисуем в 8 раз крупнее и честно усредняем пиксели — так края чёткие, без «мыла»
+    ss = 8 if size <= 96 else 4
     S = size * ss
     # фон: радиальный градиент от центра чуть выше середины к тёмным краям
     yy, xx = np.mgrid[0:S, 0:S].astype(np.float32) / (S - 1)
@@ -53,13 +57,14 @@ def tile(size, v):
     rgb = np.where(d < 0.5, lerp(c0, c1, d / 0.5), lerp(c1, c2, (d - 0.5) / 0.5))
     bg = Image.fromarray(rgb.astype(np.uint8)).convert("RGBA")
 
-    eye_w = int(S * (0.92 if size <= 32 else 0.84))
-    dil = (ss if size <= 24 else ss // 2) if size <= 48 else 0
+    eye_w = int(S * (0.96 if size <= 32 else 0.9 if size <= 96 else 0.84))
+    # тонкие линии глаза на маленьких размерах чуть утолщаем, чтобы не рассыпались
+    dil = round(ss * (0.55 if size <= 24 else 0.4 if size <= 40 else 0.25 if size <= 72 else 0))
     a = eye_alpha(eye_w, dil)
     ox, oy = (S - a.width) // 2, (S - a.height) // 2 + int(S * 0.01)
 
-    # свечение за глазом
-    if v["glow"]:
+    # свечение за глазом (на маленьких размерах только мешает чёткости)
+    if v["glow"] and size >= 64:
         g = Image.new("L", (S, S), 0)
         g.paste(a, (ox, oy))
         g = g.filter(ImageFilter.GaussianBlur(S * 0.07))
@@ -68,13 +73,15 @@ def tile(size, v):
         bg.alpha_composite(glow)
 
     # сам глаз
-    if v["eye"] == "grad":
+    e = v["eye"]
+    if e == "grad":
         eye = brand_gradient(a.width, a.height)
         # верх чуть светлее, чтобы глаз не терялся
-        hi = Image.new("RGBA", a.size, (255, 255, 255, 90))
-        eye.alpha_composite(hi)
+        eye.alpha_composite(Image.new("RGBA", a.size, (255, 255, 255, 90)))
+    elif isinstance(e, tuple) and isinstance(e[0], tuple):
+        eye = brand_gradient(a.width, a.height, *e)
     else:
-        eye = Image.new("RGBA", a.size, (255, 255, 255, 255))
+        eye = Image.new("RGBA", a.size, (255, 255, 255, 255) if e == "white" else e + (255,))
     eye.putalpha(a)
     bg.alpha_composite(eye, (ox, oy))
 
@@ -84,25 +91,30 @@ def tile(size, v):
     ImageDraw.Draw(m).rounded_rectangle((0, 0, S - 1, S - 1), radius=r, fill=255)
     edge = Image.new("RGBA", (S, S), (0, 0, 0, 0))
     ImageDraw.Draw(edge).rounded_rectangle((0, 0, S - 1, S - 1), radius=r,
-                                           outline=(255, 255, 255, 34), width=max(1, int(S * 0.012)))
+                                           outline=(255, 255, 255, 34), width=max(ss, int(S * 0.012)))
     bg.alpha_composite(edge)
     bg.putalpha(m)
-    return bg.resize((size, size), Image.LANCZOS)
+    out = bg.reduce(ss)
+    if size <= 48:
+        out = out.filter(ImageFilter.UnsharpMask(radius=0.6, percent=70, threshold=0))
+    return out
 
 
 def preview(path):
-    sizes = [128, 64, 48, 32, 24, 16]
-    row_h = 150
-    W = 40 + sum(s + 24 for s in sizes) + 40
+    sizes = [96, 48, 32, 24]
+    row_h = 120
+    W = 70 + sum(sz + 26 for sz in sizes) + 20
     out = Image.new("RGBA", (W * 2, row_h * len(VARIANTS) + 20), (0, 0, 0, 255))
-    for half, bgc in enumerate([(32, 32, 36, 255), (214, 220, 228, 255)]):
-        ImageDraw.Draw(out).rectangle((half * W, 0, half * W + W, out.height), fill=bgc)
-        for row, (name, v) in enumerate(VARIANTS.items()):
-            x = half * W + 40
+    d = ImageDraw.Draw(out)
+    for half, (bgc, fg) in enumerate([((205, 214, 226, 255), (40, 40, 50, 255)), ((30, 30, 34, 255), (220, 220, 230, 255))]):
+        d.rectangle((half * W, 0, half * W + W, out.height), fill=bgc)
+        for row, name in enumerate(VARIANTS):
             y0 = 10 + row * row_h
-            for s in sizes:
-                out.alpha_composite(tile(s, v), (x, y0 + (128 - s) // 2 + 6))
-                x += s + 24
+            d.text((half * W + 22, y0 + 40), str(row + 1), fill=fg)
+            x = half * W + 60
+            for sz in sizes:
+                out.alpha_composite(tile(sz, VARIANTS[name]), (x, y0 + (96 - sz) // 2 + 6))
+                x += sz + 26
     out.save(path)
 
 
@@ -110,7 +122,7 @@ def main():
     if "--preview" in sys.argv:
         preview(sys.argv[sys.argv.index("--preview") + 1])
         return
-    name = sys.argv[1] if len(sys.argv) > 1 else "glow"
+    name = sys.argv[1] if len(sys.argv) > 1 else "soft"
     tiles = [tile(s, VARIANTS[name]) for s in SIZES]
     tiles[-1].save(ROOT / "assets" / "icon.ico", sizes=[(s, s) for s in SIZES], append_images=tiles[:-1])
     tiles[-1].save(ROOT / "assets" / "icon-256.png")
