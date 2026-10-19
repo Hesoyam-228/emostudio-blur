@@ -1,0 +1,17 @@
+# окружение Python (у каждого своё, ставится через install.bat)
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# результаты и личные файлы
+censored/
+settings.json
+*.log
+
+# редакторы и система
+.claude/
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

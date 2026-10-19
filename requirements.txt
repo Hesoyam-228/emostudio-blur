@@ -1,0 +1,8 @@
+dghs-imgutils>=0.19.0
+onnxruntime>=1.20
+opencv-python>=4.10
+pillow>=10.0
+numpy>=1.26,<2.3
+scipy>=1.11
+pywebview>=6.0
+pywin32>=306
