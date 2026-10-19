@@ -43,6 +43,11 @@ def load_settings():
         s.update(json.loads(SETTINGS_FILE.read_text(encoding="utf-8")))
     except Exception:
         pass
+    # версия 2 добавила зону «анус» — включаем её и тем, у кого настройки сохранены раньше
+    if s.get("parts_version", 1) < 2:
+        if "anus" not in s["parts"]:
+            s["parts"] = list(s["parts"]) + ["anus"]
+        s["parts_version"] = 2
     return s
 
 

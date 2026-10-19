@@ -30,7 +30,7 @@ def main():
     ap.add_argument("inputs", nargs="*", help="файлы или папки")
     ap.add_argument("-o", "--out", help="папка для результата (по умолчанию <папка>/censored)")
     ap.add_argument("--parts", default=",".join(d["parts"]),
-                    help="что блюрить, через запятую: nipples,penis,pussy")
+                    help="что блюрить, через запятую: nipples,penis,pussy,anus")
     ap.add_argument("--full", action="store_true", help="блюрить член целиком, а не только головку")
     ap.add_argument("--tip-size", type=float, default=d["tip_size"], help="длина зоны головки (1.0 = головка и чуть ниже)")
     ap.add_argument("--conf", type=float, default=d["conf"], help="порог для сосков 0..1 (меньше = находит больше)")

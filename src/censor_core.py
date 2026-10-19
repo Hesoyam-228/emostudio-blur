@@ -1,4 +1,4 @@
-"""Ядро: поиск сосков/гениталий и блюр. Используется и приложением, и консольным скриптом."""
+"""Ядро: поиск интимных зон и блюр. Используется и приложением, и консольным скриптом."""
 import sys
 from collections import deque
 
@@ -11,7 +11,7 @@ EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 LABELS = {"nipple_f": "nipples", "penis": "penis", "pussy": "pussy"}
 
 DEFAULTS = {
-    "parts": ["nipples", "penis", "pussy"],
+    "parts": ["nipples", "penis", "pussy", "anus"],
     "penis_mode": "tip",   # "tip" = только головка, "full" = целиком
     "tip_size": 1.0,       # длина зоны головки (1.0 = головка и чуть ниже)
     "conf": 0.3,           # порог для сосков
@@ -146,6 +146,47 @@ def find_tip(rgb, box, tip_size=1.0, body_hint=None):
 
 RAW_CONF = 0.1
 
+# вторая модель (аниме-арты, лицензия MIT) — нужна для зоны «анус», которой нет в первой
+ANUS_REPO = "01miku/anime-nsfw-segm-yolo26"
+ANUS_FILE = "nsfw-anime-nano-x640.onnx"
+ANUS_SIZE = 640
+ANUS_PAD = 0.35  # рамки у этой модели плотные — зону делаем чуть шире
+_anus_session = None
+
+
+def _anus_model():
+    global _anus_session
+    if _anus_session is None:
+        import onnxruntime as ort
+        from huggingface_hub import hf_hub_download
+
+        path = hf_hub_download(ANUS_REPO, ANUS_FILE)
+        _anus_session = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+    return _anus_session
+
+
+def detect_anus(rgb, conf=RAW_CONF):
+    """YOLO-сегментация: выход [4 рамка + 7 классов + 32 маски] на каждый якорь, класс 0 — anus."""
+    sess = _anus_model()
+    h, w = rgb.shape[:2]
+    r = ANUS_SIZE / max(h, w)
+    nh, nw = int(round(h * r)), int(round(w * r))
+    top, left = (ANUS_SIZE - nh) // 2, (ANUS_SIZE - nw) // 2
+    canvas = np.full((ANUS_SIZE, ANUS_SIZE, 3), 114, np.uint8)
+    canvas[top:top + nh, left:left + nw] = cv2.resize(rgb, (nw, nh), interpolation=cv2.INTER_LINEAR)
+    x = canvas.transpose(2, 0, 1)[None].astype(np.float32) / 255
+    out = sess.run(None, {sess.get_inputs()[0].name: x})[0][0].T
+    score = out[:, 4]
+    keep = (score >= conf) & (out[:, 4:11].argmax(1) == 0)
+    if not keep.any():
+        return []
+    cx, cy, bw, bh = out[keep, :4].T
+    sc = score[keep]
+    xywh = np.stack([(cx - bw / 2 - left) / r, (cy - bh / 2 - top) / r, bw / r, bh / r], 1)
+    idx = np.array(cv2.dnn.NMSBoxes(xywh.tolist(), sc.tolist(), conf, 0.5)).flatten()
+    return [((float(a), float(b), float(a + c), float(b + d)), "anus", float(sc[i]))
+            for i, (a, b, c, d) in ((i, xywh[i]) for i in idx)]
+
 
 def raw_detect(rgb):
     """Тяжёлая часть (нейросеть). Результат можно кэшировать и потом быстро пересобирать зоны."""
@@ -156,6 +197,10 @@ def raw_detect(rgb):
     for level in ("s", "n"):
         for box, label, score in detect_censors(pil, level=level, conf_threshold=RAW_CONF):
             boxes.append((tuple(float(v) for v in box), LABELS.get(label, label), float(score)))
+    try:
+        boxes += detect_anus(rgb)
+    except Exception as e:  # без второй модели программа всё равно работает
+        print(f"(зона «анус» недоступна: {e})", file=sys.stderr)
     head = None
     if any(k == "penis" for _, k, _ in boxes):
         heads = detect_heads(pil)
@@ -195,7 +240,7 @@ def make_spots(rgb, raw, settings=None):
                 spots.append({"x": x, "y": y, "rx": r, "ry": r, "kind": kind, "score": round(score, 2)})
                 continue
             warnings.append("Не нашёл головку — заблюрен весь член")
-        spots.append(_box_spot(box, kind, score, s["pad"]))
+        spots.append(_box_spot(box, kind, score, s["pad"] + (ANUS_PAD if kind == "anus" else 0)))
     if not spots:
         warnings.append("Ничего не найдено")
     return spots, warnings
@@ -264,6 +309,7 @@ def warmup():
     for level in ("s", "n"):
         detect_censors(img, level=level)
     detect_heads(img)
+    _anus_model()
 
 
 if __name__ == "__main__":
