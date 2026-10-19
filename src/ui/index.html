@@ -403,7 +403,7 @@ input[type=range]:active::-webkit-slider-thumb { transform: scale(1.12); }
       </div>
       <div class="topinfo hidden" id="topinfo"></div>
       <div class="hint hidden" id="hint">
-        Клик — новая зона · тащи — двигать · <kbd>колесо</kbd> размер · <kbd>ПКМ</kbd> удалить · <kbd>Пробел</kbd> оригинал
+        Клик — новая зона · тащи — двигать · <kbd>колесо</kbd> размер · <kbd>Shift</kbd>+<kbd>колесо</kbd> поворот · <kbd>ПКМ</kbd> удалить · <kbd>Пробел</kbd> оригинал
       </div>
       <div class="toolbar hidden" id="toolbar">
         <button class="btn icon" id="bPrev" title="Предыдущая (←)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="m15 18-6-6 6-6"/></svg></button>
@@ -493,6 +493,8 @@ input[type=range]:active::-webkit-slider-thumb { transform: scale(1.12); }
             <div><kbd>Клик</kbd>добавить зону (тяни — размер)</div>
             <div><kbd>Тащить</kbd>двигать зону / уголок — размер</div>
             <div><kbd>Колесо</kbd>размер зоны под курсором</div>
+            <div><kbd>Кружок ↻</kbd>повернуть (Shift — по 15°)</div>
+            <div><kbd>Shift+колесо</kbd>повернуть зону под курсором</div>
             <div><kbd>ПКМ / Del</kbd>удалить зону</div>
             <div><kbd>Ctrl+колесо</kbd>приблизить, СКМ — двигать вид</div>
             <div><kbd>← →</kbd>соседние картинки</div>
@@ -725,7 +727,27 @@ function buildEffect() {
   }
   c.effect = e;
 }
-function ellipse(g, x, y, rx, ry) { g.beginPath(); g.ellipse(x, y, Math.max(1, rx), Math.max(1, ry), 0, 0, Math.PI * 2); }
+function ellipse(g, x, y, rx, ry, rot = 0) { g.beginPath(); g.ellipse(x, y, Math.max(1, rx), Math.max(1, ry), rot, 0, Math.PI * 2); }
+
+// зона может быть повёрнута: angle в градусах (как в OpenCV), 0 — без поворота
+const DEG = Math.PI / 180, ROT_GAP = 28;
+const rad = (s) => (s.angle || 0) * DEG;
+function fromLocal(s, lx, ly) {
+  const a = rad(s), c = Math.cos(a), n = Math.sin(a);
+  return { x: s.x + lx * c - ly * n, y: s.y + lx * n + ly * c };
+}
+function toLocal(s, p) {
+  const a = rad(s), c = Math.cos(a), n = Math.sin(a), dx = p.x - s.x, dy = p.y - s.y;
+  return { x: dx * c + dy * n, y: -dx * n + dy * c };
+}
+function handles(s, sc) {
+  return {
+    size: fromLocal(s, s.rx * 0.7071, s.ry * 0.7071),
+    top: fromLocal(s, 0, -s.ry),
+    rot: fromLocal(s, 0, -(s.ry + ROT_GAP / sc)),
+  };
+}
+const normAngle = (a) => ((((a + 180) % 360) + 360) % 360) - 180;
 
 function draw() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -746,7 +768,7 @@ function draw() {
     mctx.filter = `blur(${feather * sc * dpr}px)`;
     mctx.fillStyle = "#fff";
     for (let pass = 0; pass < 2; pass++)
-      for (const s of c.spots) { ellipse(mctx, ox + s.x * sc, oy + s.y * sc, s.rx * sc, s.ry * sc); mctx.fill(); }
+      for (const s of c.spots) { ellipse(mctx, ox + s.x * sc, oy + s.y * sc, s.rx * sc, s.ry * sc, rad(s)); mctx.fill(); }
     mctx.filter = "none";
     tctx.setTransform(1, 0, 0, 1, 0, 0); tctx.clearRect(0, 0, tmpCv.width, tmpCv.height);
     tctx.globalCompositeOperation = "source-over";
@@ -768,17 +790,29 @@ function draw() {
     ctx.lineWidth = i === S.sel ? 2 : 1.5;
     ctx.strokeStyle = k.color;
     ctx.setLineDash(i === S.sel ? [] : [5, 4]);
-    ellipse(ctx, x, y, rx, ry); ctx.stroke();
+    ellipse(ctx, x, y, rx, ry, rad(s)); ctx.stroke();
     ctx.setLineDash([]);
     if (active) {
+      const hd = handles(s, sc), at = (q) => [ox + q.x * sc, oy + q.y * sc];
       // ручка размера
+      const [hx, hy] = at(hd.size);
       ctx.fillStyle = "#fff"; ctx.strokeStyle = k.color; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(x + rx * 0.7071, y + ry * 0.7071, 6, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-      // подпись
-      const label = k.name + (s.score ? " " + Math.round(s.score * 100) + "%" : "");
+      ctx.beginPath(); ctx.arc(hx, hy, 6, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      // ручка поворота (у выбранной зоны)
+      if (i === S.sel) {
+        const [tx, ty] = at(hd.top), [rx2, ry2] = at(hd.rot);
+        ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(rx2, ry2); ctx.stroke();
+        ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(rx2, ry2, 8, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.lineWidth = 1.6; ctx.beginPath(); ctx.arc(rx2, ry2, 3.6, -Math.PI * 0.9, Math.PI * 0.55); ctx.stroke();
+      }
+      // подпись снизу, чтобы не мешала ручке поворота
+      const a = rad(s), ext = Math.sqrt((rx * Math.sin(a)) ** 2 + (ry * Math.cos(a)) ** 2);
+      const rotating = S.drag && S.drag.rotate && S.drag.i === i;
+      const label = rotating ? `${Math.round(s.angle || 0)}°`
+        : k.name + (s.score ? " " + Math.round(s.score * 100) + "%" : "") + (s.angle ? ` · ${Math.round(s.angle)}°` : "");
       ctx.font = "600 12px Inter, Segoe UI, sans-serif";
       const tw = ctx.measureText(label).width + 14;
-      const lx = x - tw / 2, ly = y - ry - 28;
+      const lx = x - tw / 2, ly = y + ext + 8;
       ctx.fillStyle = k.color;
       ctx.beginPath(); ctx.roundRect(lx, ly, tw, 20, 10); ctx.fill();
       ctx.fillStyle = "#120f1a"; ctx.textBaseline = "middle"; ctx.textAlign = "center";
@@ -795,14 +829,18 @@ function toImg(e) {
 function hit(p) {
   const c = S.cur; if (!c) return { i: -1 };
   const { sc } = geom();
-  for (let i = c.spots.length - 1; i >= 0; i--) {
-    const s = c.spots[i];
-    const hx = s.x + s.rx * 0.7071, hy = s.y + s.ry * 0.7071;
-    if (Math.hypot(p.x - hx, p.y - hy) * sc < 10) return { i, handle: true };
+  const sel = c.spots[S.sel];
+  if (sel) {
+    const r = handles(sel, sc).rot;
+    if (Math.hypot(p.x - r.x, p.y - r.y) * sc < 11) return { i: S.sel, rotate: true };
   }
   for (let i = c.spots.length - 1; i >= 0; i--) {
-    const s = c.spots[i];
-    if (((p.x - s.x) / s.rx) ** 2 + ((p.y - s.y) / s.ry) ** 2 <= 1) return { i, handle: false };
+    const h = handles(c.spots[i], sc).size;
+    if (Math.hypot(p.x - h.x, p.y - h.y) * sc < 10) return { i, handle: true };
+  }
+  for (let i = c.spots.length - 1; i >= 0; i--) {
+    const s = c.spots[i], l = toLocal(s, p);
+    if ((l.x / s.rx) ** 2 + (l.y / s.ry) ** 2 <= 1) return { i, handle: false };
   }
   return { i: -1 };
 }
@@ -820,7 +858,9 @@ cv.addEventListener("mousedown", (e) => {
   if (h.i >= 0) {
     S.sel = h.i;
     const s = S.cur.spots[h.i];
-    S.drag = h.handle ? { resize: true, i: h.i } : { move: true, i: h.i, dx: p.x - s.x, dy: p.y - s.y };
+    if (h.rotate) cv.style.cursor = "grabbing";
+    S.drag = h.rotate ? { rotate: true, i: h.i }
+      : h.handle ? { resize: true, i: h.i } : { move: true, i: h.i, dx: p.x - s.x, dy: p.y - s.y };
   } else {
     const r = Math.min(S.cur.w, S.cur.h) * 0.035;
     S.cur.spots.push({ x: p.x, y: p.y, rx: r, ry: r, kind: "manual", score: 0 });
@@ -838,8 +878,13 @@ window.addEventListener("mousemove", (e) => {
     const s = S.cur.spots[d.i];
     if (d.move) { s.x = p.x - d.dx; s.y = p.y - d.dy; }
     else if (d.resize) {
-      s.rx = Math.max(3, Math.abs(p.x - s.x) / 0.7071); s.ry = Math.max(3, Math.abs(p.y - s.y) / 0.7071);
+      const l = toLocal(s, p);
+      s.rx = Math.max(3, Math.abs(l.x) / 0.7071); s.ry = Math.max(3, Math.abs(l.y) / 0.7071);
       if (e.shiftKey) s.rx = s.ry = Math.max(s.rx, s.ry);
+    } else if (d.rotate) {
+      let a = Math.atan2(p.y - s.y, p.x - s.x) / DEG + 90;
+      if (e.shiftKey) a = Math.round(a / 15) * 15;
+      s.angle = normAngle(a);
     } else if (d.create) {
       const dist = Math.hypot(p.x - d.sx, p.y - d.sy);
       if (dist * p.sc > 4 || d.moved) { d.moved = true; s.rx = s.ry = Math.max(3, dist); }
@@ -848,7 +893,7 @@ window.addEventListener("mousemove", (e) => {
   }
   if (e.target !== cv) return;
   const h = hit(p);
-  cv.style.cursor = h.handle ? "nwse-resize" : h.i >= 0 ? "move" : "crosshair";
+  cv.style.cursor = h.rotate ? "grab" : h.handle ? "nwse-resize" : h.i >= 0 ? "move" : "crosshair";
   if (h.i !== S.hover) { S.hover = h.i; draw(); }
 });
 window.addEventListener("mouseup", () => { if (S.drag) { S.drag = null; draw(); } });
@@ -872,8 +917,14 @@ cv.addEventListener("wheel", (e) => {
   }
   const h = hit(toImg(e));
   if (h.i < 0) return;
-  const s = S.cur.spots[h.i], f = e.deltaY < 0 ? 1.08 : 1 / 1.08;
-  s.rx = Math.max(3, s.rx * f); s.ry = Math.max(3, s.ry * f);
+  // с Shift колесо часто приходит как горизонтальная прокрутка
+  const dv = e.deltaY || e.deltaX, s = S.cur.spots[h.i];
+  if (e.shiftKey) {
+    s.angle = normAngle((s.angle || 0) + (dv < 0 ? -5 : 5));
+  } else {
+    const f = dv < 0 ? 1.08 : 1 / 1.08;
+    s.rx = Math.max(3, s.rx * f); s.ry = Math.max(3, s.ry * f);
+  }
   S.sel = h.i; changed();
 }, { passive: false });
 cv.addEventListener("dblclick", (e) => {
@@ -905,6 +956,7 @@ async function openItem(id) {
   img.onload = () => {
     S.cur = { id, img, w: img.naturalWidth, h: img.naturalHeight, spots: JSON.parse(JSON.stringify(S.items.get(id).spots)), effect: null, localEdit: false };
     S.sel = S.hover = -1; S.view = { zoom: 1, px: 0, py: 0 };
+    if (!cw || !ch) resize();
     buildEffect(); renderTopInfo(); draw();
     document.querySelectorAll(".card").forEach((c) => c.classList.toggle("on", +c.dataset.id === id));
     document.querySelector(`.card[data-id="${id}"]`)?.scrollIntoView({ block: "nearest" });

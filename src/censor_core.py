@@ -229,7 +229,7 @@ def render(rgb, spots, strength=1.0, style="blur"):
     mask = np.zeros((h, w), np.float32)
     for sp in spots:
         cv2.ellipse(mask, (int(sp["x"]), int(sp["y"])),
-                    (max(1, int(sp["rx"])), max(1, int(sp["ry"]))), 0, 0, 360, 1.0, -1)
+                    (max(1, int(sp["rx"])), max(1, int(sp["ry"]))), float(sp.get("angle", 0)), 0, 360, 1.0, -1)
     feather = max(3, int(min(h, w) * 0.012))
     mask = cv2.GaussianBlur(mask, (0, 0), feather)
     mask = np.clip(mask * 1.6, 0, 1)[..., None]
@@ -249,7 +249,8 @@ def render(rgb, spots, strength=1.0, style="blur"):
 def draw_debug(rgb, spots):
     img = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR).copy()
     for sp in spots:
-        cv2.ellipse(img, (int(sp["x"]), int(sp["y"])), (int(sp["rx"]), int(sp["ry"])), 0, 0, 360, (0, 0, 255), 2)
+        cv2.ellipse(img, (int(sp["x"]), int(sp["y"])), (int(sp["rx"]), int(sp["ry"])),
+                    float(sp.get("angle", 0)), 0, 360, (0, 0, 255), 2)
         cv2.putText(img, f'{sp["kind"]} {sp["score"]}', (int(sp["x"] - sp["rx"]), int(sp["y"] - sp["ry"]) - 4),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
