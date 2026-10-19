@@ -5,9 +5,12 @@ import io
 import json
 import os
 import queue
+import re
+import subprocess
 import sys
 import threading
 import traceback
+import urllib.request
 from pathlib import Path
 
 APP_NAME = "EmoStudio Blur"
@@ -18,6 +21,9 @@ ICON = ROOT / "assets" / "icon.ico"
 DATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / APP_NAME
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 SETTINGS_FILE = DATA_DIR / "settings.json"
+REPO = "Hesoyam-228/emostudio-blur"
+# адрес можно подменить для проверки обновления без публикации
+VERSION_URL = os.environ.get("EMOSTUDIO_VERSION_URL", f"https://raw.githubusercontent.com/{REPO}/main/version.txt")
 
 # без консоли (pythonw) stdout/stderr отсутствуют — пишем всё в лог, чтобы ничего не падало
 if sys.stdout is None or sys.stderr is None:
@@ -35,6 +41,17 @@ import censor_core as core  # noqa: E402
 
 # настройки, от которых зависят зоны блюра (меняются — пересобираем зоны)
 SPOT_KEYS = {"parts", "penis_mode", "tip_size", "conf", "conf_genitals", "pad"}
+
+
+def read_version():
+    try:
+        return (ROOT / "version.txt").read_text(encoding="utf-8").strip() or "0.0.0"
+    except Exception:
+        return "0.0.0"
+
+
+def version_key(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v)[:3]) or (0,)
 
 
 def load_settings():
@@ -82,7 +99,35 @@ class Api:
         self._lock = threading.Lock()
         self._tasks = queue.Queue()
         self._window = None
+        self._version = read_version()
+        self._update = None
         threading.Thread(target=self._worker, daemon=True).start()
+        threading.Thread(target=self._check_update, daemon=True).start()
+
+    # ---------- обновления ----------
+    def _check_update(self):
+        """Тихо узнаём номер последней версии на GitHub. Нет интернета — просто молчим."""
+        try:
+            req = urllib.request.Request(VERSION_URL, headers={"Cache-Control": "no-cache"})
+            latest = urllib.request.urlopen(req, timeout=8).read().decode("utf-8").strip()
+        except Exception:
+            return
+        if latest and version_key(latest) > version_key(self._version):
+            self._update = latest
+            self._push("onUpdate", {"current": self._version, "latest": latest})
+
+    def start_update(self):
+        """Открываем окно обновления и закрываем программу — обновление перезапустит её само."""
+        script = ROOT / "tools" / "update.ps1"
+        if not script.exists():
+            return False
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script),
+             "-Relaunch", "-WaitPid", str(os.getpid())],
+            cwd=str(ROOT), creationflags=subprocess.CREATE_NEW_CONSOLE)
+        if self._window:
+            threading.Timer(0.6, self._window.destroy).start()
+        return True
 
     # ---------- общение с окном ----------
     def _push(self, fn, payload):
@@ -161,7 +206,8 @@ class Api:
 
     # ---------- методы для интерфейса ----------
     def get_state(self):
-        return {"settings": self._settings, "items": [self._items[i].public() for i in self._order]}
+        return {"settings": self._settings, "items": [self._items[i].public() for i in self._order],
+                "version": self._version, "update": self._update}
 
     def add_paths(self, paths):
         added = []

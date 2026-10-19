@@ -98,6 +98,8 @@ Say "Библиотеки готовы" "Green"
 # 4. Модели
 Step 4 "Скачиваю модели распознавания"
 $env:HF_HUB_DISABLE_PROGRESS_BARS = "1"
+$env:HF_HUB_VERBOSITY = "error"
+$env:PYTHONWARNINGS = "ignore"
 & $venvPy (Join-Path $Root "src\censor_core.py") --download
 if ($LASTEXITCODE -ne 0) { Fail "не удалось скачать модели (проверь интернет)" }
 
