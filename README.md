@@ -259,7 +259,9 @@ EmoStudio Blur/
 │   ├── censor_core.py                 распознавание и блюр
 │   ├── autoblur.py                    быстрый режим (командная строка)
 │   ├── shortcuts.py                   создание ярлыков
-│   └── ui/index.html                  интерфейс
+│   └── ui/
+│       ├── index.html                 интерфейс
+│       └── fonts/                     шрифт Inter и его лицензия
 └── tools/setup.ps1                    сам установщик
 ```
 
@@ -267,9 +269,7 @@ EmoStudio Blur/
 
 ## Благодарности
 
-- [deepghs/imgutils](https://github.com/deepghs/imgutils) — модели распознавания для аниме-артов
-- [pywebview](https://pywebview.flowrl.com/) — окно программы
-- [OpenCV](https://opencv.org/), [Pillow](https://python-pillow.org/), [SciPy](https://scipy.org/) — обработка изображений
+- [Claude](https://claude.ai) от Anthropic — помощь в разработке
 
 ---
 
