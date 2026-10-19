@@ -82,6 +82,18 @@ aside.settings { border-left: 1px solid var(--line); overflow-y: auto; }
 /* ---------- список файлов ---------- */
 .files-head { padding: 14px 14px 10px; display: flex; align-items: center; gap: 8px; }
 .files-head h2 { margin: 0; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); }
+.add-wrap { position: relative; }
+.icon-btn { width: 30px; padding: 0; justify-content: center; }
+.add-menu {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 5; min-width: 160px; padding: 5px;
+  background: var(--panel-3); border: 1px solid var(--line); border-radius: 11px; box-shadow: 0 12px 34px rgba(0,0,0,.45);
+}
+.add-menu button {
+  display: flex; align-items: center; gap: 9px; width: 100%; height: 34px; padding: 0 10px; border: none;
+  background: transparent; border-radius: 7px; cursor: pointer; font-size: 13px; text-align: left;
+}
+.add-menu button:hover { background: var(--panel-2); }
+.add-menu svg { width: 16px; height: 16px; color: var(--muted); }
 .count { font-size: 12px; color: var(--faint); }
 .tabs { display: flex; gap: 4px; padding: 0 12px 10px; }
 .tab {
@@ -235,14 +247,6 @@ input[type=range]::-webkit-slider-thumb {
 <div class="app">
   <header>
     <div class="brand"><div class="brand-mark" id="brandEye"></div><div class="brand-text"><b>EmoStudio</b><span>auto blur</span></div></div>
-    <button class="btn" id="bFolder">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-      Папка
-    </button>
-    <button class="btn" id="bFiles">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></svg>
-      Картинки
-    </button>
     <div class="spacer"></div>
     <div class="busy hidden" id="busy"><span id="busyText"></span><div class="bar"><i id="busyBar"></i></div></div>
     <button class="btn ghost" id="bOpenOut" title="Открыть папку с результатами">
@@ -260,6 +264,21 @@ input[type=range]::-webkit-slider-thumb {
       <div class="files-head">
         <h2>Файлы</h2><span class="count" id="count"></span>
         <div class="spacer"></div>
+        <div class="add-wrap">
+          <button class="btn small icon-btn" id="bAdd" title="Добавить арты">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+          <div class="add-menu hidden" id="addMenu">
+            <button id="bFolder">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+              Папка
+            </button>
+            <button id="bFiles">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></svg>
+              Картинки
+            </button>
+          </div>
+        </div>
         <button class="btn ghost small" id="bClear" title="Очистить список">Очистить</button>
       </div>
       <div class="tabs">
@@ -826,8 +845,11 @@ $("bSaveAll").onclick = async () => {
   const n = await S.api.save_all();
   toast(n ? `Сохраняю ${n} ${plural(n, "картинку", "картинки", "картинок")}…` : "Нечего сохранять");
 };
-$("bFolder").onclick = $("bFolder2").onclick = () => S.api.pick_folder();
-$("bFiles").onclick = $("bFiles2").onclick = () => S.api.pick_files();
+const addMenu = $("addMenu");
+$("bAdd").onclick = (e) => { e.stopPropagation(); addMenu.classList.toggle("hidden"); };
+document.addEventListener("click", () => addMenu.classList.add("hidden"));
+$("bFolder").onclick = $("bFolder2").onclick = () => { addMenu.classList.add("hidden"); S.api.pick_folder(); };
+$("bFiles").onclick = $("bFiles2").onclick = () => { addMenu.classList.add("hidden"); S.api.pick_files(); };
 $("bOpenOut").onclick = () => S.api.open_output(S.cur ? S.cur.id : null);
 $("bClear").onclick = () => {
   S.api.clear(); S.items.clear(); S.order = []; S.cur = null; draw();
