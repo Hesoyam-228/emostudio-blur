@@ -1,6 +1,7 @@
 """Ядро: поиск интимных зон и блюр. Используется и приложением, и консольным скриптом."""
+import os
 import sys
-from collections import deque
+import threading
 
 import cv2
 import numpy as np
@@ -49,21 +50,57 @@ def _box_spot(box, kind, score, pad):
     }
 
 
+_threads = os.cpu_count() or 4
+
+
+def _session_options():
+    import onnxruntime as ort
+
+    o = ort.SessionOptions()
+    o.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    o.intra_op_num_threads = _threads
+    o.add_session_config_entry("session.intra_op.allow_spinning", "0")
+    return o
+
+
+def set_threads(n):
+    """
+    Сколько ядер даём каждой нейросети. Программа обрабатывает несколько картинок сразу,
+    и если каждая модель берёт все ядра, они мешают друг другу. Вызывать до первого распознавания.
+    """
+    global _threads
+    _threads = max(1, int(n))
+    import imgutils.utils.onnxruntime as iort
+    from onnxruntime import InferenceSession
+
+    def _open(ckpt, provider, use_cpu=True):
+        providers = [provider] + (["CPUExecutionProvider"] if use_cpu and provider != "CPUExecutionProvider" else [])
+        return InferenceSession(ckpt, _session_options(), providers=providers)
+
+    iort._open_onnx_model = _open
+
+
+_CROSS = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], np.uint8)
+
+
 def _bfs(mask, sources):
-    """Геодезическое расстояние внутри маски от набора стартовых пикселей."""
-    dist = np.full(mask.shape, -1, np.int32)
-    q = deque()
+    """
+    Геодезическое расстояние внутри маски от набора стартовых пикселей (4-связность).
+    Волна расширяется целым фронтом через cv2.dilate — в десятки раз быстрее обхода по пикселям.
+    """
+    m = mask.astype(np.uint8)
+    dist = np.full(m.shape, -1, np.int32)
+    front = np.zeros_like(m)
     for y, x in sources:
-        dist[y, x] = 0
-        q.append((y, x))
-    h, w = mask.shape
-    while q:
-        y, x = q.popleft()
-        dv = dist[y, x] + 1
-        for yy, xx in ((y + 1, x), (y - 1, x), (y, x + 1), (y, x - 1)):
-            if 0 <= yy < h and 0 <= xx < w and mask[yy, xx] and dist[yy, xx] < 0:
-                dist[yy, xx] = dv
-                q.append((yy, xx))
+        front[y, x] = 1
+    front &= m
+    visited = front.copy()
+    d = 0
+    while front.any():
+        dist[front.astype(bool)] = d
+        d += 1
+        front = cv2.dilate(front, _CROSS) & m & (1 - visited)
+        visited |= front
     return dist
 
 
@@ -145,23 +182,29 @@ def find_tip(rgb, box, tip_size=1.0, body_hint=None):
 
 
 RAW_CONF = 0.1
+HEAD_MODEL = "head_detect_v2.0_n"
 
 # вторая модель (аниме-арты, лицензия MIT) — нужна для зоны «анус», которой нет в первой
 ANUS_REPO = "01miku/anime-nsfw-segm-yolo26"
 ANUS_FILE = "nsfw-anime-nano-x640.onnx"
 ANUS_SIZE = 640
 ANUS_PAD = 0.35  # рамки у этой модели плотные — зону делаем чуть шире
+# меняется вместе с моделями — тогда кэш распознавания программы сбрасывается сам
+MODELS_ID = f"censor_v1.0_s+n|{HEAD_MODEL}|{ANUS_FILE}|{RAW_CONF}"
 _anus_session = None
+_anus_lock = threading.Lock()
 
 
 def _anus_model():
     global _anus_session
-    if _anus_session is None:
+    with _anus_lock:
+        if _anus_session is not None:
+            return _anus_session
         import onnxruntime as ort
         from huggingface_hub import hf_hub_download
 
         path = hf_hub_download(ANUS_REPO, ANUS_FILE)
-        _anus_session = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+        _anus_session = ort.InferenceSession(path, _session_options(), providers=["CPUExecutionProvider"])
     return _anus_session
 
 
@@ -203,7 +246,8 @@ def raw_detect(rgb):
         print(f"(зона «анус» недоступна: {e})", file=sys.stderr)
     head = None
     if any(k == "penis" for _, k, _ in boxes):
-        heads = detect_heads(pil)
+        # голова нужна только как ориентир «где тело» — хватает лёгкой модели
+        heads = detect_heads(pil, model_name=HEAD_MODEL)
         if heads:
             (hx0, hy0, hx1, hy1), _, _ = max(heads, key=lambda d: d[2])
             head = ((hx0 + hx1) / 2, (hy0 + hy1) / 2)
@@ -267,28 +311,64 @@ def _dedupe(boxes):
     return out
 
 
+def _merge_rects(rects):
+    """Сливаем пересекающиеся прямоугольники, пока не останутся только раздельные."""
+    rects = [list(r) for r in rects]
+    merged = True
+    while merged:
+        merged = False
+        for i in range(len(rects)):
+            for j in range(i + 1, len(rects)):
+                a, b = rects[i], rects[j]
+                if a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]:
+                    rects[i] = [min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])]
+                    rects.pop(j)
+                    merged = True
+                    break
+            if merged:
+                break
+    return rects
+
+
 def render(rgb, spots, strength=1.0, style="blur"):
     h, w = rgb.shape[:2]
     if not spots:
         return rgb
-    mask = np.zeros((h, w), np.float32)
-    for sp in spots:
-        cv2.ellipse(mask, (int(sp["x"]), int(sp["y"])),
-                    (max(1, int(sp["rx"])), max(1, int(sp["ry"]))), float(sp.get("angle", 0)), 0, 360, 1.0, -1)
     feather = max(3, int(min(h, w) * 0.012))
-    mask = cv2.GaussianBlur(mask, (0, 0), feather)
-    mask = np.clip(mask * 1.6, 0, 1)[..., None]
+    sigma = max(2.0, min(h, w) * strength / 100)
 
     if style == "pixel":
+        # пикселизация дешёвая, считаем на всей картинке, чтобы сетка квадратов совпадала с предпросмотром
         block = max(4, int(min(h, w) * strength / 100 * 1.5))
         small = cv2.resize(rgb, (max(1, w // block), max(1, h // block)), interpolation=cv2.INTER_LINEAR)
-        censored = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
+        censored_full = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
+        margin = 3 * feather
     else:
-        sigma = max(2.0, min(h, w) * strength / 100)
-        censored = cv2.GaussianBlur(rgb, (0, 0), sigma)
+        censored_full = None
+        margin = 3 * feather + int(4 * sigma)  # запас, чтобы размытие у края кусочка не отличалось
 
-    out = rgb.astype(np.float32) * (1 - mask) + censored.astype(np.float32) * mask
-    return out.astype(np.uint8)
+    # блюрим не всю картинку, а только кусочки вокруг зон — результат тот же, но в разы быстрее
+    rects = []
+    for sp in spots:
+        e = max(sp["rx"], sp["ry"]) + margin
+        rects.append((max(0, int(sp["x"] - e)), max(0, int(sp["y"] - e)),
+                      min(w, int(sp["x"] + e) + 1), min(h, int(sp["y"] + e) + 1)))
+    out = rgb.copy()
+    for x0, y0, x1, y1 in _merge_rects(rects):
+        if x1 <= x0 or y1 <= y0:
+            continue
+        crop = rgb[y0:y1, x0:x1]
+        mask = np.zeros(crop.shape[:2], np.float32)
+        for sp in spots:
+            cv2.ellipse(mask, (int(sp["x"]) - x0, int(sp["y"]) - y0),
+                        (max(1, int(sp["rx"])), max(1, int(sp["ry"]))), float(sp.get("angle", 0)), 0, 360, 1.0, -1)
+        mask = np.clip(cv2.GaussianBlur(mask, (0, 0), feather) * 1.6, 0, 1)[..., None]
+        if censored_full is not None:
+            censored = censored_full[y0:y1, x0:x1]
+        else:
+            censored = cv2.GaussianBlur(crop, (0, 0), sigma)
+        out[y0:y1, x0:x1] = (crop.astype(np.float32) * (1 - mask) + censored.astype(np.float32) * mask).astype(np.uint8)
+    return out
 
 
 def draw_debug(rgb, spots):
@@ -308,7 +388,7 @@ def warmup():
     img = Image.new("RGB", (256, 256), (128, 128, 128))
     for level in ("s", "n"):
         detect_censors(img, level=level)
-    detect_heads(img)
+    detect_heads(img, model_name=HEAD_MODEL)
     _anus_model()
 
 

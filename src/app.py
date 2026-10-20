@@ -39,6 +39,63 @@ from PIL import Image  # noqa: E402
 
 import censor_core as core  # noqa: E402
 
+# сколько картинок обрабатывать одновременно (нейросети и так используют несколько ядер)
+WORKERS = int(os.environ.get("EMOSTUDIO_WORKERS", 0)) or max(2, min(4, (os.cpu_count() or 4) // 3))
+CACHE_FILE = DATA_DIR / "detect_cache.jsonl"
+
+
+class DetectCache:
+    """
+    Результаты нейросети на диске: повторно открытая папка распознаётся мгновенно.
+    Ключ — путь, размер и время изменения файла плюс версия моделей; поменялся файл — считаем заново.
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self.lock = threading.Lock()
+        self.data = {}
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+            for line in lines:
+                try:
+                    rec = json.loads(line)
+                    self.data[rec["k"]] = rec["raw"]
+                except Exception:
+                    pass
+            if len(lines) > 2 * len(self.data) + 100 or len(self.data) > 20000:
+                keep = list(self.data.items())[-10000:]
+                self.data = dict(keep)
+                path.write_text("".join(json.dumps({"k": k, "raw": v}) + "\n" for k, v in keep), encoding="utf-8")
+        except FileNotFoundError:
+            pass
+        except Exception:
+            traceback.print_exc()
+
+    @staticmethod
+    def key(path):
+        st = Path(path).stat()
+        return f"{core.MODELS_ID}|{Path(path).resolve()}|{st.st_size}|{st.st_mtime_ns}"
+
+    def get(self, path):
+        try:
+            return self.data.get(self.key(path))
+        except OSError:
+            return None
+
+    def put(self, path, raw):
+        try:
+            k = self.key(path)
+        except OSError:
+            return
+        with self.lock:
+            self.data[k] = raw
+            try:
+                with open(self.path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps({"k": k, "raw": raw}) + "\n")
+            except Exception:
+                pass
+
+
 # настройки, от которых зависят зоны блюра (меняются — пересобираем зоны)
 SPOT_KEYS = {"parts", "penis_mode", "tip_size", "conf", "conf_genitals", "pad"}
 
@@ -101,20 +158,62 @@ class Api:
         self._window = None
         self._version = read_version()
         self._latest = None
-        threading.Thread(target=self._worker, daemon=True).start()
+        self._cache = DetectCache(CACHE_FILE)
+        core.set_threads(max(1, (os.cpu_count() or 4) // WORKERS))
+        for _ in range(WORKERS):
+            threading.Thread(target=self._worker, daemon=True).start()
         threading.Thread(target=self._check_update, daemon=True).start()
+        threading.Thread(target=self._first_run_shortcut, daemon=True).start()
+
+    # ---------- ярлык ----------
+    def _first_run_shortcut(self):
+        """Если установка не успела сделать ярлык — делаем его сами, но только один раз."""
+        if self._settings.get("shortcut_checked"):
+            return
+        try:
+            import shortcuts
+            if not shortcuts.desktop_shortcut_exists():
+                made, _ = shortcuts.create_all()
+                if made:
+                    self._push("onToast", "Создал ярлык EmoStudio Blur на рабочем столе")
+        except Exception:
+            traceback.print_exc()
+        self.update_settings({"shortcut_checked": True})
+
+    def make_shortcuts(self):
+        try:
+            import shortcuts
+            made, errors = shortcuts.create_all()
+            return {"ok": bool(made), "error": "; ".join(errors)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"ok": False, "error": str(e)}
 
     # ---------- обновления ----------
+    def _fetch_latest(self):
+        req = urllib.request.Request(VERSION_URL, headers={"Cache-Control": "no-cache"})
+        return urllib.request.urlopen(req, timeout=8).read().decode("utf-8").strip()
+
     def _check_update(self):
         """Тихо узнаём номер последней версии на GitHub. Нет интернета — просто молчим."""
         try:
-            req = urllib.request.Request(VERSION_URL, headers={"Cache-Control": "no-cache"})
-            latest = urllib.request.urlopen(req, timeout=8).read().decode("utf-8").strip()
+            latest = self._fetch_latest()
         except Exception:
             return
         if latest and version_key(latest) > version_key(self._version):
             self._latest = latest
             self._push("onUpdate", {"current": self._version, "latest": latest})
+
+    def check_update_now(self):
+        """Кнопка «Проверить обновления»."""
+        try:
+            latest = self._fetch_latest()
+        except Exception as e:
+            return {"current": self._version, "error": str(e)}
+        available = bool(latest) and version_key(latest) > version_key(self._version)
+        if available:
+            self._latest = latest
+        return {"current": self._version, "latest": latest, "available": available}
 
     def start_update(self):
         """Открываем окно обновления и закрываем программу — обновление перезапустит её само."""
@@ -182,7 +281,11 @@ class Api:
             buf = io.BytesIO()
             im.save(buf, "JPEG", quality=80)
             item.thumb = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
-        item.raw = core.raw_detect(rgb)
+        raw = self._cache.get(item.path)
+        if raw is None:
+            raw = core.raw_detect(rgb)
+            self._cache.put(item.path, raw)
+        item.raw = raw
         if not item.edited:
             item.spots, item.warnings = core.make_spots(rgb, item.raw, self._settings)
         item.status = "ready"

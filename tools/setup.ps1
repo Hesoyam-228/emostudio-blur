@@ -95,18 +95,24 @@ Step 3 "Ставлю библиотеки (это самый долгий шаг
 if ($LASTEXITCODE -ne 0) { Fail "не удалось установить библиотеки" }
 Say "Библиотеки готовы" "Green"
 
-# 4. Модели
-Step 4 "Скачиваю модели распознавания"
-$env:HF_HUB_DISABLE_PROGRESS_BARS = "1"
+# 4. Ярлыки — раньше моделей, чтобы ярлык был, даже если окно закроют во время долгого скачивания
+Step 4 "Создаю ярлыки на рабочем столе и в меню «Пуск»"
+& $venvPy (Join-Path $Root "src\shortcuts.py")
+if ($LASTEXITCODE -ne 0) {
+    Say "Ярлыки создать не получилось — запускай через «EmoStudio Blur.bat»." "Yellow"
+    Say "Подробности: %APPDATA%\EmoStudio Blur\shortcuts.log" "DarkGray"
+}
+
+# 5. Модели
+Step 5 "Скачиваю модели распознавания (около 100 МБ)"
+Say "Это может занять несколько минут. Не закрывай окно, даже если кажется, что ничего не происходит." "Yellow"
 $env:HF_HUB_VERBOSITY = "error"
 $env:PYTHONWARNINGS = "ignore"
 & $venvPy (Join-Path $Root "src\censor_core.py") --download
-if ($LASTEXITCODE -ne 0) { Fail "не удалось скачать модели (проверь интернет)" }
-
-# 5. Ярлыки
-Step 5 "Создаю ярлыки на рабочем столе и в меню «Пуск»"
-& $venvPy (Join-Path $Root "src\shortcuts.py")
-if ($LASTEXITCODE -ne 0) { Say "Ярлыки создать не получилось — запускай через «EmoStudio Blur.bat»." "Yellow" }
+if ($LASTEXITCODE -ne 0) {
+    Say "Модели пока не скачались (нет интернета или huggingface.co недоступен)." "Yellow"
+    Say "Ничего страшного: программа докачает их сама при первом запуске." "Yellow"
+}
 
 Write-Host ""
 Say "   Готово! EmoStudio Blur установлен." "Green"

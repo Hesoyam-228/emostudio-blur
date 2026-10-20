@@ -333,6 +333,7 @@ input[type=range]:active::-webkit-slider-thumb { transform: scale(1.12); }
   font: 500 11px/1 inherit; min-width: 70px; text-align: center; color: var(--label); background: var(--fill-2);
   border-radius: 6px; padding: 5px 7px; box-shadow: inset 0 -1px 0 rgba(0,0,0,.45), 0 0 0 .5px rgba(255,255,255,.1);
 }
+.app-ver { font-size: 13px; color: var(--label-2); font-variant-numeric: tabular-nums; }
 .foot { padding: 14px 20px 0; display: flex; justify-content: space-between; align-items: center; }
 .foot .ver { font-size: 11px; color: var(--label-3); letter-spacing: .02em; }
 
@@ -512,6 +513,15 @@ input[type=range]:active::-webkit-slider-thumb { transform: scale(1.12); }
             <div><kbd>← →</kbd>соседние картинки</div>
             <div><kbd>Ctrl+S</kbd>сохранить текущую</div>
           </div>
+        </div>
+      </section>
+      <section class="group">
+        <h3>Программа</h3>
+        <div class="box">
+          <div class="row"><span class="app-ver" id="verText2">Версия</span><div class="spacer"></div>
+            <button class="btn small" id="bCheckUpd">Проверить обновления</button></div>
+          <div class="row" style="margin-top:10px">
+            <button class="btn small ghost" id="bShortcut">Создать ярлык на рабочем столе</button></div>
         </div>
       </section>
       <div class="foot">
@@ -1101,12 +1111,28 @@ function showUpdate(latest) {
   $("bUpdate").classList.remove("hidden");
 }
 window.onUpdate = (u) => { showUpdate(u.latest); toast(`Вышла новая версия v${u.latest}`); };
-$("bUpdate").onclick = async () => {
+window.onToast = (msg) => toast(msg);
+async function runUpdate() {
   const unsaved = [...S.items.values()].filter((i) => ["queued", "working", "ready"].includes(i.status)).length;
   if (unsaved && !confirm(`Несохранённых картинок: ${unsaved}. Для обновления программа закроется, и правки в них пропадут. Обновить сейчас?`)) return;
   toast("Запускаю обновление…");
   const ok = await S.api.start_update();
   if (!ok) toast("Не нашёл файлы обновления — запусти update.bat в папке программы");
+}
+$("bUpdate").onclick = runUpdate;
+$("bCheckUpd").onclick = async () => {
+  const b = $("bCheckUpd");
+  b.disabled = true; b.textContent = "Проверяю…";
+  const r = await S.api.check_update_now();
+  b.disabled = false; b.textContent = "Проверить обновления";
+  if (r.error) { toast("Не получилось проверить — нет интернета?"); return; }
+  if (!r.available) { toast(`У тебя последняя версия v${r.current}`); return; }
+  showUpdate(r.latest);
+  if (confirm(`Вышла версия v${r.latest} (у тебя v${r.current}). Обновить сейчас?`)) runUpdate();
+};
+$("bShortcut").onclick = async () => {
+  const r = await S.api.make_shortcuts();
+  toast(r.ok ? "Ярлык EmoStudio Blur создан на рабочем столе" : "Не получилось создать ярлык: " + r.error);
 };
 
 // ---------- старт ----------
@@ -1116,6 +1142,7 @@ window.addEventListener("pywebviewready", async () => {
   S.settings = st.settings;
   renderSettings();
   $("verText").textContent = `EmoStudio · v${st.version}`;
+  $("verText2").textContent = `Версия ${st.version}`;
   showUpdate(st.update);
   for (const it of st.items) { S.items.set(it.id, it); S.order.push(it.id); }
   renderList();
