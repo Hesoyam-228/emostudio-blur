@@ -100,7 +100,7 @@ class Api:
         self._tasks = queue.Queue()
         self._window = None
         self._version = read_version()
-        self._update = None
+        self._latest = None
         threading.Thread(target=self._worker, daemon=True).start()
         threading.Thread(target=self._check_update, daemon=True).start()
 
@@ -113,7 +113,7 @@ class Api:
         except Exception:
             return
         if latest and version_key(latest) > version_key(self._version):
-            self._update = latest
+            self._latest = latest
             self._push("onUpdate", {"current": self._version, "latest": latest})
 
     def start_update(self):
@@ -207,7 +207,7 @@ class Api:
     # ---------- методы для интерфейса ----------
     def get_state(self):
         return {"settings": self._settings, "items": [self._items[i].public() for i in self._order],
-                "version": self._version, "update": self._update}
+                "version": self._version, "update": self._latest}
 
     def add_paths(self, paths):
         added = []
