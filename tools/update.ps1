@@ -71,6 +71,12 @@ if (-not (Test-Path $venvPy)) {
     exit $LASTEXITCODE
 }
 Step 2 "Обновляю библиотеки и модели"
+# с 1.3.0 нейросети считаются на видеокарте: обычная onnxruntime мешает версии с DirectML
+& $venvPy -m pip show onnxruntime *> $null
+if ($LASTEXITCODE -eq 0) {
+    & $venvPy -m pip uninstall -y -q onnxruntime
+    & $venvPy -m pip install --force-reinstall --no-deps -q --disable-pip-version-check "onnxruntime-directml>=1.20"
+}
 & $venvPy -m pip install -r (Join-Path $Root "requirements.txt") --disable-pip-version-check -q
 if ($LASTEXITCODE -ne 0) { Fail "не удалось обновить библиотеки" $false }
 $env:HF_HUB_DISABLE_PROGRESS_BARS = "1"

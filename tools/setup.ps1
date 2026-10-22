@@ -91,6 +91,12 @@ if (-not (Test-Path $venvPy)) {
 # 3. Библиотеки
 Step 3 "Ставлю библиотеки (это самый долгий шаг)"
 & $venvPy -m pip install --upgrade pip --disable-pip-version-check -q
+# нейросети считаются на видеокарте (DirectML): обычная onnxruntime с ней конфликтует
+& $venvPy -m pip show onnxruntime *> $null
+if ($LASTEXITCODE -eq 0) {
+    & $venvPy -m pip uninstall -y -q onnxruntime
+    & $venvPy -m pip install --force-reinstall --no-deps -q --disable-pip-version-check "onnxruntime-directml>=1.20"
+}
 & $venvPy -m pip install -r requirements.txt --disable-pip-version-check
 if ($LASTEXITCODE -ne 0) { Fail "не удалось установить библиотеки" }
 Say "Библиотеки готовы" "Green"

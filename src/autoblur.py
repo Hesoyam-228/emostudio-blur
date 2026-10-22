@@ -50,6 +50,7 @@ def main():
         "penis_mode": "full" if args.full else "tip",
         "tip_size": args.tip_size, "conf": args.conf, "conf_genitals": args.conf_genitals, "pad": args.pad,
     }
+    core.configure(use_gpu=True)  # видеокарта, если есть; иначе процессор
 
     files = collect(args.inputs)
     if not files:

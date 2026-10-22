@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 import traceback
 import urllib.request
 from pathlib import Path
@@ -37,7 +38,27 @@ import webview  # noqa: E402
 from webview.dom import DOMEventHandler  # noqa: E402
 from PIL import Image  # noqa: E402
 
-import censor_core as core  # noqa: E402
+import config  # noqa: E402
+
+
+class _LazyCore:
+    """
+    censor_core тянет OpenCV, SciPy и нейросети — это секунды при первом запуске после включения компа.
+    Поэтому импортируем его не до окна, а в фоне, когда окно уже открыто.
+    """
+    _mod = None
+    _lock = threading.Lock()
+
+    def __getattr__(self, name):
+        if _LazyCore._mod is None:
+            with _LazyCore._lock:
+                if _LazyCore._mod is None:
+                    import censor_core
+                    _LazyCore._mod = censor_core
+        return getattr(_LazyCore._mod, name)
+
+
+core = _LazyCore()
 
 # сколько картинок обрабатывать одновременно (нейросети и так используют несколько ядер)
 WORKERS = int(os.environ.get("EMOSTUDIO_WORKERS", 0)) or max(2, min(4, (os.cpu_count() or 4) // 3))
@@ -74,7 +95,7 @@ class DetectCache:
     @staticmethod
     def key(path):
         st = Path(path).stat()
-        return f"{core.MODELS_ID}|{Path(path).resolve()}|{st.st_size}|{st.st_mtime_ns}"
+        return f"{config.MODELS_ID}|{Path(path).resolve()}|{st.st_size}|{st.st_mtime_ns}"
 
     def get(self, path):
         try:
@@ -97,7 +118,7 @@ class DetectCache:
 
 
 # настройки, от которых зависят зоны блюра (меняются — пересобираем зоны)
-SPOT_KEYS = {"parts", "penis_mode", "tip_size", "conf", "conf_genitals", "pad"}
+SPOT_KEYS = {"parts", "penis_mode", "tip_size", "conf", "conf_genitals", "pad", "verify"}
 
 
 def read_version():
@@ -112,11 +133,15 @@ def version_key(v):
 
 
 def load_settings():
-    s = dict(core.DEFAULTS, out_dir="")
+    s = dict(config.DEFAULTS, out_dir="")
     try:
         s.update(json.loads(SETTINGS_FILE.read_text(encoding="utf-8")))
     except Exception:
         pass
+    # в тестовой сборке 1.3.0 были стили «полоса», «сердце» и «стикер» — их больше нет
+    if s.get("style") not in ("blur", "pixel"):
+        s["style"] = "blur"
+    s.pop("sticker_path", None)
     # версия 2 добавила зону «анус» — включаем её и тем, у кого настройки сохранены раньше
     if s.get("parts_version", 1) < 2:
         if "anus" not in s["parts"]:
@@ -138,6 +163,7 @@ class Item:
         self.thumb = None
         self.error = ""
         self.out = ""
+        self.autosave = False  # пришло из папки, за которой следим, — сохранить сразу после распознавания
 
     def public(self):
         return {
@@ -159,11 +185,28 @@ class Api:
         self._version = read_version()
         self._latest = None
         self._cache = DetectCache(CACHE_FILE)
-        core.set_threads(max(1, (os.cpu_count() or 4) // WORKERS))
+        self._ready = threading.Event()
+        self._engine = {"state": "loading", "device": None}
+        threading.Thread(target=self._prepare_engine, daemon=True).start()
         for _ in range(WORKERS):
             threading.Thread(target=self._worker, daemon=True).start()
         threading.Thread(target=self._check_update, daemon=True).start()
         threading.Thread(target=self._first_run_shortcut, daemon=True).start()
+        threading.Thread(target=self._watch_loop, daemon=True).start()
+
+    # ---------- нейросети ----------
+    def _prepare_engine(self):
+        """Грузим ядро и все нейросети в фоне сразу после старта — первая картинка уже не ждёт."""
+        try:
+            core.configure(threads=max(1, (os.cpu_count() or 4) // WORKERS),
+                           use_gpu=self._settings.get("gpu", True))
+            core.warmup_sessions()
+            self._engine = {"state": "ready", "device": core.device()}
+        except Exception as e:
+            traceback.print_exc()
+            self._engine = {"state": "error", "device": None, "error": str(e)}
+        self._ready.set()
+        self._push("onEngine", self._engine)
 
     # ---------- ярлык ----------
     def _first_run_shortcut(self):
@@ -246,6 +289,7 @@ class Api:
 
     # ---------- фоновая работа ----------
     def _worker(self):
+        self._ready.wait()  # пока нейросети грузятся, задачи просто копятся в очереди
         while True:
             kind, iid = self._tasks.get()
             item = self._items.get(iid)
@@ -267,7 +311,7 @@ class Api:
             except Exception as e:
                 traceback.print_exc()
                 item.status = "error"
-                item.error = str(e)
+                item.error = str(e) or type(e).__name__
             self._update(item)
             self._progress()
 
@@ -289,6 +333,9 @@ class Api:
         if not item.edited:
             item.spots, item.warnings = core.make_spots(rgb, item.raw, self._settings)
         item.status = "ready"
+        if item.autosave:
+            item.autosave = False
+            self._tasks.put(("save", item.id))
 
     def _out_path(self, item):
         out_dir = self._settings.get("out_dir")
@@ -310,30 +357,86 @@ class Api:
     # ---------- методы для интерфейса ----------
     def get_state(self):
         return {"settings": self._settings, "items": [self._items[i].public() for i in self._order],
-                "version": self._version, "update": self._latest}
+                "version": self._version, "update": self._latest, "engine": self._engine}
+
+    # ---------- слежение за папкой ----------
+    def _watch_files(self, root):
+        out_dir = self._settings.get("out_dir")
+        out = Path(out_dir).resolve() if out_dir else None
+        for f in root.rglob("*"):
+            if f.suffix.lower() not in config.EXTS or "censored" in f.relative_to(root).parts:
+                continue
+            if out is not None and (out == f.resolve().parent or out in f.resolve().parents):
+                continue  # свои же результаты не подхватываем
+            yield f
+
+    def _watch_loop(self):
+        """Раз в 2 секунды ищем новые арты. Файл берём, когда его размер перестал меняться — ComfyUI дописал."""
+        root, seen, pending = None, set(), {}
+        while True:
+            time.sleep(2)
+            d = self._settings.get("watch_dir")
+            try:
+                if not d or not Path(d).is_dir():
+                    root = None
+                    continue
+                if root != Path(d):  # начали следить: всё, что уже лежит в папке, не трогаем
+                    root, pending = Path(d), {}
+                    seen = set(self._watch_files(root))
+                    continue
+                for f in self._watch_files(root):
+                    if f in seen:
+                        continue
+                    size = f.stat().st_size
+                    if size > 0 and pending.get(f) == size:
+                        seen.add(f)
+                        pending.pop(f, None)
+                        self._add_files([(f, root)], autosave=True)
+                    else:
+                        pending[f] = size
+            except Exception:
+                traceback.print_exc()
+
+    def start_watch(self):
+        res = self._window.create_file_dialog(webview.FileDialog.FOLDER)
+        if res:
+            self.update_settings({"watch_dir": res[0]})
+        return self._settings
+
+    def stop_watch(self):
+        return self.update_settings({"watch_dir": ""})
+
+    def _add_files(self, files, autosave=False):
+        added = []
+        for f, root in files:
+            with self._lock:
+                if any(i.path == f for i in self._items.values()):
+                    continue
+                item = Item(self._next_id, f, root)
+                item.autosave = autosave
+                self._next_id += 1
+                self._items[item.id] = item
+                self._order.append(item.id)
+            added.append(item.public())
+            self._tasks.put(("detect", item.id))
+        if added:
+            self._push("onAdded", added if not autosave else [dict(i, watched=True) for i in added])
+        self._progress()
+        return added
 
     def add_paths(self, paths):
         added = []
         for p in map(Path, paths or []):
             if p.is_dir():
                 files = [(f, p) for f in sorted(p.rglob("*"))
-                         if f.suffix.lower() in core.EXTS and "censored" not in f.relative_to(p).parts]
-            elif p.suffix.lower() in core.EXTS:
+                         if f.suffix.lower() in config.EXTS and "censored" not in f.relative_to(p).parts]
+            elif p.suffix.lower() in config.EXTS:
                 files = [(p, p.parent)]
             else:
                 files = []
-            for f, root in files:
-                with self._lock:
-                    if any(i.path == f for i in self._items.values()):
-                        continue
-                    item = Item(self._next_id, f, root)
-                    self._next_id += 1
-                    self._items[item.id] = item
-                    self._order.append(item.id)
-                added.append(item.public())
-                self._tasks.put(("detect", item.id))
-        self._push("onAdded", added)
-        self._progress()
+            added += self._add_files(files)
+        if not added:
+            self._push("onAdded", [])
         return len(added)
 
     def pick_folder(self):
@@ -387,7 +490,7 @@ class Api:
 
     def reset_settings(self):
         keep = self._settings.get("out_dir", "")
-        return self.update_settings(dict(core.DEFAULTS, out_dir=keep))
+        return self.update_settings(dict(config.DEFAULTS, out_dir=keep))
 
     def save(self, iid):
         self._items[iid].status = "queued"

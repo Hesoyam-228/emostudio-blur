@@ -8,19 +8,17 @@ import numpy as np
 from PIL import Image
 from scipy import ndimage
 
-EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
-LABELS = {"nipple_f": "nipples", "penis": "penis", "pussy": "pussy"}
+from config import (ANUS_PAD, DEFAULTS, EXTRA_CLASSES, EXTRA_FILE, EXTRA_REPO, EXTRA_SIZE, EXTS,  # noqa: F401
+                    HEAD_MODEL, MODELS_ID, RAW_CONF)
 
-DEFAULTS = {
-    "parts": ["nipples", "penis", "pussy", "anus"],
-    "penis_mode": "tip",   # "tip" = только головка, "full" = целиком
-    "tip_size": 1.0,       # длина зоны головки (1.0 = головка и чуть ниже)
-    "conf": 0.3,           # порог для сосков
-    "conf_genitals": 0.2,  # порог для гениталий
-    "pad": 0.15,           # расширение зоны
-    "strength": 1.0,       # сила блюра
-    "style": "blur",       # "blur" или "pixel"
-}
+LABELS = {"nipple_f": "nipples", "penis": "penis", "pussy": "pussy"}
+# зона без подтверждения второй моделью остаётся, только если первая в ней очень уверена
+VERIFY_KEEP = 0.6
+# что вторая модель нашла, а первая нет, добавляем при такой уверенности
+EXTRA_ADD = 0.5
+# размер и число итераций GrabCut при поиске кончика (меньше — быстрее, но грубее)
+TIP_RES = 160
+TIP_ITERS = 3
 
 
 def load_rgb(path):
@@ -51,33 +49,98 @@ def _box_spot(box, kind, score, pad):
 
 
 _threads = os.cpu_count() or 4
+_use_gpu = True
+_device = "cpu"  # что реально используется: "gpu" или "cpu"
 
 
-def _session_options():
+_gpu_lock = threading.Lock()  # одна очередь на все модели: DirectML падает от одновременных запросов
+_gpu_sessions = {}  # одна сессия на модель: imgutils открывает модель заново в каждом потоке
+
+
+class _LockedSession:
+    """
+    Видеокарта обрабатывает запросы по одному — все потоки делят одну сессию и встают в общую очередь.
+    Если видеокарта сбоит, запрос пересчитывается на процессоре, а после двух сбоев подряд модель уходит туда насовсем.
+    """
+
+    def __init__(self, sess, path):
+        self._s, self._path = sess, path
+        self._cpu = None
+        self._fails = 0
+
+    def run(self, *a, **k):
+        if self._fails < 2:
+            try:
+                with _gpu_lock:
+                    out = self._s.run(*a, **k)
+                self._fails = 0
+                return out
+            except Exception as e:
+                self._fails += 1
+                print(f"(сбой видеокарты, пересчитываю на процессоре: {type(e).__name__} {e})", file=sys.stderr)
+        with _gpu_lock:
+            if self._cpu is None:
+                self._cpu = _cpu_session(self._path)
+        return self._cpu.run(*a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._s, name)
+
+
+def _new_session(path):
+    """Нейросеть на видеокарте (DirectML), а если не вышло — на процессоре."""
+    global _device
+    import onnxruntime as ort
+
+    if _use_gpu and "DmlExecutionProvider" in ort.get_available_providers():
+        with _gpu_lock:  # пока сессия создаётся, видеокарта не должна ничего считать
+            if path in _gpu_sessions:
+                return _gpu_sessions[path]
+            try:
+                o = ort.SessionOptions()
+                o.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+                o.enable_mem_pattern = False  # требование DirectML
+                o.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+                sess = ort.InferenceSession(path, o, providers=["DmlExecutionProvider", "CPUExecutionProvider"])
+                if sess.get_providers()[0] == "DmlExecutionProvider":
+                    _device = "gpu"
+                    _gpu_sessions[path] = _LockedSession(sess, path)
+                    return _gpu_sessions[path]
+            except Exception as e:
+                print(f"(видеокарта недоступна, считаю на процессоре: {e})", file=sys.stderr)
+    return _cpu_session(path)
+
+
+def _cpu_session(path):
     import onnxruntime as ort
 
     o = ort.SessionOptions()
     o.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     o.intra_op_num_threads = _threads
     o.add_session_config_entry("session.intra_op.allow_spinning", "0")
-    return o
+    return ort.InferenceSession(path, o, providers=["CPUExecutionProvider"])
+
+
+def configure(threads=None, use_gpu=True):
+    """
+    Вызывать до первого распознавания. threads — сколько ядер даём каждой нейросети на процессоре
+    (программа обрабатывает несколько картинок сразу, и если каждая модель берёт все ядра, они мешают друг другу).
+    """
+    global _threads, _use_gpu
+    if threads:
+        _threads = max(1, int(threads))
+    _use_gpu = bool(use_gpu)
+    import imgutils.utils.onnxruntime as iort
+
+    iort._open_onnx_model = lambda ckpt, provider=None, use_cpu=True: _new_session(ckpt)
 
 
 def set_threads(n):
-    """
-    Сколько ядер даём каждой нейросети. Программа обрабатывает несколько картинок сразу,
-    и если каждая модель берёт все ядра, они мешают друг другу. Вызывать до первого распознавания.
-    """
-    global _threads
-    _threads = max(1, int(n))
-    import imgutils.utils.onnxruntime as iort
-    from onnxruntime import InferenceSession
+    configure(threads=n, use_gpu=_use_gpu)
 
-    def _open(ckpt, provider, use_cpu=True):
-        providers = [provider] + (["CPUExecutionProvider"] if use_cpu and provider != "CPUExecutionProvider" else [])
-        return InferenceSession(ckpt, _session_options(), providers=providers)
 
-    iort._open_onnx_model = _open
+def device():
+    return _device
 
 
 _CROSS = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], np.uint8)
@@ -121,7 +184,7 @@ def find_tip(rgb, box, tip_size=1.0, body_hint=None):
 
     # работаем в уменьшенном кропе — так быстрее
     crop = cv2.cvtColor(rgb[ey0:ey1, ex0:ex1], cv2.COLOR_RGB2BGR)
-    scale = min(1.0, 260 / max(crop.shape[:2]))
+    scale = min(1.0, TIP_RES / max(crop.shape[:2]))
     small = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1 else crop
     sh, sw = small.shape[:2]
     bx0, by0 = int((x0 - ex0) * scale), int((y0 - ey0) * scale)
@@ -132,7 +195,7 @@ def find_tip(rgb, box, tip_size=1.0, body_hint=None):
     gc[:2, :] = gc[-2:, :] = cv2.GC_BGD
     gc[:, :2] = gc[:, -2:] = cv2.GC_BGD
     try:
-        cv2.grabCut(small, gc, None, np.zeros((1, 65)), np.zeros((1, 65)), 4, cv2.GC_INIT_WITH_MASK)
+        cv2.grabCut(small, gc, None, np.zeros((1, 65)), np.zeros((1, 65)), TIP_ITERS, cv2.GC_INIT_WITH_MASK)
     except cv2.error:
         return None
     fg = ((gc == cv2.GC_FGD) | (gc == cv2.GC_PR_FGD)).astype(np.uint8)
@@ -161,13 +224,13 @@ def find_tip(rgb, box, tip_size=1.0, body_hint=None):
     else:
         hx, hy = sw / 2, -sh
     if (ax - hx) ** 2 + (ay - hy) ** 2 > (bx_ - hx) ** 2 + (by_ - hy) ** 2:
-        ty, tx = ay, ax
+        ty, tx, tip_dist = ay, ax, da  # расстояния от этого конца уже посчитаны
     else:
         ty, tx = by_, bx_
+        tip_dist = _bfs(main, [(ty, tx)])
 
     # толщина члена у кончика
     dt = cv2.distanceTransform(main.astype(np.uint8), cv2.DIST_L2, 3)
-    tip_dist = _bfs(main, [(ty, tx)])
     near = (tip_dist >= 0) & (tip_dist < far * 0.3)
     thick = 2 * float(dt[near].max()) if near.any() else far * 0.3
 
@@ -181,54 +244,63 @@ def find_tip(rgb, box, tip_size=1.0, body_hint=None):
     return (cx / scale + ex0, cy / scale + ey0, r / scale)
 
 
-RAW_CONF = 0.1
-HEAD_MODEL = "head_detect_v2.0_n"
-
-# вторая модель (аниме-арты, лицензия MIT) — нужна для зоны «анус», которой нет в первой
-ANUS_REPO = "01miku/anime-nsfw-segm-yolo26"
-ANUS_FILE = "nsfw-anime-nano-x640.onnx"
-ANUS_SIZE = 640
-ANUS_PAD = 0.35  # рамки у этой модели плотные — зону делаем чуть шире
-# меняется вместе с моделями — тогда кэш распознавания программы сбрасывается сам
-MODELS_ID = f"censor_v1.0_s+n|{HEAD_MODEL}|{ANUS_FILE}|{RAW_CONF}"
-_anus_session = None
-_anus_lock = threading.Lock()
+_extra_session = None
+_extra_lock = threading.Lock()
 
 
-def _anus_model():
-    global _anus_session
-    with _anus_lock:
-        if _anus_session is not None:
-            return _anus_session
-        import onnxruntime as ort
-        from huggingface_hub import hf_hub_download
+def _extra_model():
+    global _extra_session
+    with _extra_lock:
+        if _extra_session is None:
+            from huggingface_hub import hf_hub_download
 
-        path = hf_hub_download(ANUS_REPO, ANUS_FILE)
-        _anus_session = ort.InferenceSession(path, _session_options(), providers=["CPUExecutionProvider"])
-    return _anus_session
+            _extra_session = _new_session(hf_hub_download(EXTRA_REPO, EXTRA_FILE))
+    return _extra_session
 
 
-def detect_anus(rgb, conf=RAW_CONF):
-    """YOLO-сегментация: выход [4 рамка + 7 классов + 32 маски] на каждый якорь, класс 0 — anus."""
-    sess = _anus_model()
+def detect_extra(rgb, conf=RAW_CONF):
+    """
+    Вторая модель (YOLO-сегментация): выход [4 рамка + 7 классов + 32 маски] на каждый якорь.
+    Берём классы anus / nipple / penis / vagina: анус — как зону, остальные — для перепроверки.
+    """
+    sess = _extra_model()
     h, w = rgb.shape[:2]
-    r = ANUS_SIZE / max(h, w)
+    r = EXTRA_SIZE / max(h, w)
     nh, nw = int(round(h * r)), int(round(w * r))
-    top, left = (ANUS_SIZE - nh) // 2, (ANUS_SIZE - nw) // 2
-    canvas = np.full((ANUS_SIZE, ANUS_SIZE, 3), 114, np.uint8)
+    top, left = (EXTRA_SIZE - nh) // 2, (EXTRA_SIZE - nw) // 2
+    canvas = np.full((EXTRA_SIZE, EXTRA_SIZE, 3), 114, np.uint8)
     canvas[top:top + nh, left:left + nw] = cv2.resize(rgb, (nw, nh), interpolation=cv2.INTER_LINEAR)
     x = canvas.transpose(2, 0, 1)[None].astype(np.float32) / 255
     out = sess.run(None, {sess.get_inputs()[0].name: x})[0][0].T
-    score = out[:, 4]
-    keep = (score >= conf) & (out[:, 4:11].argmax(1) == 0)
-    if not keep.any():
-        return []
-    cx, cy, bw, bh = out[keep, :4].T
-    sc = score[keep]
-    xywh = np.stack([(cx - bw / 2 - left) / r, (cy - bh / 2 - top) / r, bw / r, bh / r], 1)
-    idx = np.array(cv2.dnn.NMSBoxes(xywh.tolist(), sc.tolist(), conf, 0.5)).flatten()
-    return [((float(a), float(b), float(a + c), float(b + d)), "anus", float(sc[i]))
-            for i, (a, b, c, d) in ((i, xywh[i]) for i in idx)]
+    cls = out[:, 4:11].argmax(1)
+    score = out[:, 4:11].max(1)
+    res = []
+    for c, kind in EXTRA_CLASSES.items():
+        keep = (score >= conf) & (cls == c)
+        if not keep.any():
+            continue
+        cx, cy, bw, bh = out[keep, :4].T
+        sc = score[keep]
+        xywh = np.stack([(cx - bw / 2 - left) / r, (cy - bh / 2 - top) / r, bw / r, bh / r], 1)
+        for i in np.array(cv2.dnn.NMSBoxes(xywh.tolist(), sc.tolist(), conf, 0.5)).flatten():
+            a, b, bw_, bh_ = xywh[i]
+            res.append(((float(a), float(b), float(a + bw_), float(b + bh_)), kind, float(sc[i])))
+    return res
+
+
+def detect_anus(rgb, conf=RAW_CONF):
+    return [b for b in detect_extra(rgb, conf) if b[1] == "anus"]
+
+
+def warmup_sessions():
+    """Загрузить все нейросети заранее (в фоне при старте программы), чтобы первая картинка не ждала."""
+    from imgutils.detect import detect_censors, detect_heads
+
+    img = Image.new("RGB", (64, 64), (128, 128, 128))
+    for level in ("s", "n"):
+        detect_censors(img, level=level)
+    detect_heads(img, model_name=HEAD_MODEL)
+    detect_extra(np.zeros((64, 64, 3), np.uint8))
 
 
 def raw_detect(rgb):
@@ -241,9 +313,10 @@ def raw_detect(rgb):
         for box, label, score in detect_censors(pil, level=level, conf_threshold=RAW_CONF):
             boxes.append((tuple(float(v) for v in box), LABELS.get(label, label), float(score)))
     try:
-        boxes += detect_anus(rgb)
+        extra = detect_extra(rgb)
     except Exception as e:  # без второй модели программа всё равно работает
-        print(f"(зона «анус» недоступна: {e})", file=sys.stderr)
+        print(f"(вторая модель недоступна: {e})", file=sys.stderr)
+        extra = None
     head = None
     if any(k == "penis" for _, k, _ in boxes):
         # голова нужна только как ориентир «где тело» — хватает лёгкой модели
@@ -251,7 +324,7 @@ def raw_detect(rgb):
         if heads:
             (hx0, hy0, hx1, hy1), _, _ = max(heads, key=lambda d: d[2])
             head = ((hx0 + hx1) / 2, (hy0 + hy1) / 2)
-    return {"boxes": boxes, "head": head}
+    return {"boxes": boxes, "extra": extra, "head": head}
 
 
 def make_spots(rgb, raw, settings=None):
@@ -261,11 +334,28 @@ def make_spots(rgb, raw, settings=None):
     """
     s = {**DEFAULTS, **(settings or {})}
     parts = set(s["parts"])
+    extra = raw.get("extra")
+
+    def limit(kind):
+        return s["conf"] if kind == "nipples" else s["conf_genitals"]
+
     boxes = []
     for box, kind, score in raw["boxes"]:
-        limit = s["conf"] if kind == "nipples" else s["conf_genitals"]
-        if kind in parts and score >= limit:
-            boxes.append((box, kind, score))
+        if kind not in parts or score < limit(kind):
+            continue
+        # перепроверка: слабую зону без подтверждения второй моделью отбрасываем (пальцы, складки и т.п.)
+        if s.get("verify", True) and extra is not None and score < VERIFY_KEEP and not _confirmed(box, kind, extra):
+            continue
+        boxes.append((box, kind, score))
+    for box, kind, score in extra or []:
+        if kind not in parts:
+            continue
+        if kind == "anus":
+            if score >= limit(kind):
+                boxes.append((box, kind, score))
+        elif score >= max(EXTRA_ADD, limit(kind)) and not any(
+                k == kind and _overlaps(box, b) for b, k, _ in boxes):
+            boxes.append((box, kind, score))  # первая модель это пропустила
     boxes = _dedupe(boxes)
 
     hint = raw.get("head")
@@ -292,6 +382,22 @@ def make_spots(rgb, raw, settings=None):
 
 def detect(rgb, settings=None):
     return make_spots(rgb, raw_detect(rgb), settings)[0]
+
+
+def _overlaps(a, b, min_iou=0.05):
+    """Рамки заметно пересекаются или центр одной лежит внутри другой."""
+    ca = ((a[0] + a[2]) / 2, (a[1] + a[3]) / 2)
+    cb = ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
+
+    def inside(c, r):
+        return r[0] <= c[0] <= r[2] and r[1] <= c[1] <= r[3]
+
+    return _iou(a, b) > min_iou or inside(ca, b) or inside(cb, a)
+
+
+def _confirmed(box, kind, extra):
+    # для подтверждения нужно настоящее совпадение, а не касание краем (иначе пройдёт рамка «на всю ступню»)
+    return any(k == kind and _overlaps(box, b, 0.15) for b, k, _ in extra)
 
 
 def _iou(a, b):
@@ -383,13 +489,8 @@ def draw_debug(rgb, spots):
 
 def warmup():
     """Скачивает все нужные модели заранее, чтобы первый запуск не висел."""
-    from imgutils.detect import detect_censors, detect_heads
-
-    img = Image.new("RGB", (256, 256), (128, 128, 128))
-    for level in ("s", "n"):
-        detect_censors(img, level=level)
-    detect_heads(img, model_name=HEAD_MODEL)
-    _anus_model()
+    configure(use_gpu=False)  # для скачивания видеокарта не нужна
+    warmup_sessions()
 
 
 if __name__ == "__main__":
