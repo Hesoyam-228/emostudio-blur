@@ -139,9 +139,11 @@ def load_settings():
     except Exception:
         pass
     # в тестовой сборке 1.3.0 были стили «полоса», «сердце» и «стикер» — их больше нет
-    if s.get("style") not in ("blur", "pixel"):
+    if s.get("style") not in ("blur", "pixel", "paint"):
         s["style"] = "blur"
     s.pop("sticker_path", None)
+    if not re.fullmatch(r"#[0-9a-fA-F]{6}", str(s.get("color", ""))):
+        s["color"] = config.DEFAULTS["color"]
     # версия 2 добавила зону «анус» — включаем её и тем, у кого настройки сохранены раньше
     if s.get("parts_version", 1) < 2:
         if "anus" not in s["parts"]:
@@ -348,7 +350,8 @@ class Api:
 
     def _save(self, item):
         rgb = core.load_rgb(item.path)
-        out = core.render(rgb, item.spots, self._settings["strength"], self._settings["style"])
+        out = core.render(rgb, item.spots, self._settings["strength"], self._settings["style"],
+                          self._settings["color"])
         dst = self._out_path(item)
         core.save_rgb(out, dst)
         item.out = str(dst)
@@ -481,7 +484,7 @@ class Api:
                 item = self._items[iid]
                 if item.raw is not None and not item.edited:
                     self._tasks.put(("respot", iid))
-        elif changed & {"strength", "style", "out_dir"}:
+        elif changed & {"strength", "style", "color", "out_dir"}:
             for item in self._items.values():
                 if item.status == "saved":
                     item.status = "ready"

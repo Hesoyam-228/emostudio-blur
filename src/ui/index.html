@@ -310,6 +310,64 @@ canvas#view { position: absolute; inset: 0; width: 100%; height: 100%; display: 
 .drop .row { display: flex; gap: 10px; justify-content: center; }
 .drop .btn { height: 36px; padding: 0 18px; border-radius: 9px; font-size: 13.5px; }
 
+/* ---------- выбор «чем закрашивать» ---------- */
+.pick { margin: 0 auto 24px; max-width: 420px; }
+.pick-title { font-size: 12px; font-weight: 600; color: var(--label-2); margin-bottom: 9px; letter-spacing: .01em; }
+.styles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.styles button {
+  display: flex; flex-direction: column; align-items: stretch; gap: 7px; padding: 7px 7px 8px; border: none; cursor: pointer;
+  border-radius: 14px; background: var(--fill-1); box-shadow: inset 0 0 0 .5px var(--sep);
+  font-size: 12.5px; font-weight: 500; color: var(--label-2);
+  transition: background .2s var(--ease), box-shadow .25s var(--ease), transform .35s var(--spring), color .2s;
+}
+.styles button:hover { background: var(--fill-2); color: var(--label); transform: translateY(-2px); }
+.styles button.on {
+  background: var(--accent-soft); color: var(--label); font-weight: 600;
+  box-shadow: inset 0 0 0 1.5px var(--accent), 0 6px 22px rgba(180,108,255,.25);
+}
+/* мини-картинка с примером эффекта */
+.pv {
+  position: relative; height: 54px; border-radius: 9px; overflow: hidden;
+  background:
+    repeating-linear-gradient(45deg, rgba(255,255,255,.22) 0 2px, transparent 2px 7px),
+    radial-gradient(circle at 28% 38%, #ffb3d1 0 16%, transparent 17%),
+    radial-gradient(circle at 70% 64%, #c79bff 0 18%, transparent 19%),
+    linear-gradient(135deg, #4a2a63, #6d3459);
+}
+.pv::after {
+  content: ""; position: absolute; left: 50%; top: 50%; width: 52%; height: 68%;
+  transform: translate(-50%, -50%); border-radius: 50%;
+}
+.pv-blur::after { backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px); box-shadow: 0 0 10px 4px rgba(120,70,140,.25); }
+.pv-pixel::after { background: repeating-conic-gradient(#8a4f8f 0 25%, #b37ab9 0 50%) 0 0 / 11px 11px; border-radius: 4px; width: 44px; height: 33px; }
+.pv-paint::after { background: var(--paint, #000); box-shadow: 0 0 0 1px rgba(255,255,255,.08); transition: background .25s var(--ease); }
+.swatches { display: flex; gap: 9px; justify-content: center; align-items: center; margin-top: 12px; }
+.swatches.left { justify-content: flex-start; margin-top: 2px; }
+.drop .swatches { animation: pop .3s var(--spring); }
+.sw {
+  position: relative; width: 24px; height: 24px; border-radius: 50%; border: none; padding: 0; cursor: pointer; flex: none;
+  background: var(--c); box-shadow: inset 0 0 0 1px rgba(255,255,255,.18), 0 2px 6px rgba(0,0,0,.35);
+  transition: transform .3s var(--spring), box-shadow .2s;
+}
+.sw:hover { transform: scale(1.12); }
+.sw.on { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px #fff, 0 2px 6px rgba(0,0,0,.35); }
+.sw.custom { background: conic-gradient(#ff453a, #ffd60a, #30d158, #3fa9ff, #b46cff, #ff5fa8, #ff453a); overflow: hidden; }
+.sw.custom.on::after { content: ""; position: absolute; inset: 6px; border-radius: 50%; background: var(--c); box-shadow: 0 0 0 1px rgba(0,0,0,.3); }
+.sw.custom input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; border: none; padding: 0; }
+@media (max-height: 840px) {
+  .hero-eye { width: 200px; }
+  .hero-name { font-size: 30px; margin-top: 6px; }
+  .hero-sub { margin-bottom: 18px; }
+  .drop { padding: 28px 32px 30px; }
+  .drop p { margin-bottom: 18px; }
+  .pick { margin-bottom: 18px; }
+}
+@media (max-height: 720px) {
+  .hero-eye { display: none; }
+  .hero-sub { margin-bottom: 14px; }
+}
+.empty { overflow-y: auto; place-items: safe center; }
+
 .topinfo {
   position: absolute; top: 14px; left: 16px; right: 16px; display: flex; gap: 6px; align-items: center; pointer-events: none; flex-wrap: wrap;
 }
@@ -485,6 +543,15 @@ input[type=range]:active::-webkit-slider-thumb { transform: scale(1.12); }
           <div class="hero-sub">auto blur</div>
           <h1>Перетащи сюда арты</h1>
           <p>Папку целиком или отдельные картинки. Интимные зоны найдутся сами, а ты потом проверишь и поправишь.</p>
+          <div class="pick">
+            <div class="pick-title">Чем закрашивать</div>
+            <div class="styles" id="startStyle">
+              <button data-v="blur"><span class="pv pv-blur"></span>Блюр</button>
+              <button data-v="pixel"><span class="pv pv-pixel"></span>Пиксели</button>
+              <button data-v="paint"><span class="pv pv-paint"></span>Краска</button>
+            </div>
+            <div class="swatches hidden" id="startColors"></div>
+          </div>
           <div class="row">
             <button class="btn primary" id="bFolder2">Выбрать папку</button>
             <button class="btn" id="bFiles2">Выбрать картинки</button>
@@ -546,6 +613,11 @@ input[type=range]:active::-webkit-slider-thumb { transform: scale(1.12); }
           <div class="seg" id="style">
             <button data-v="blur">Блюр</button>
             <button data-v="pixel">Пиксели</button>
+            <button data-v="paint">Краска</button>
+          </div>
+          <div class="field hidden" id="colorField" style="margin-top:14px">
+            <div class="lab"><span>Цвет краски</span><span id="vColor"></span></div>
+            <div class="swatches left" id="colors"></div>
           </div>
           <div class="field" id="strengthField" style="margin-top:14px">
             <div class="lab"><span>Сила</span><span id="vStrength"></span></div>
@@ -852,7 +924,10 @@ function buildEffect() {
   const e = document.createElement("canvas"); e.width = c.w; e.height = c.h;
   const ec = e.getContext("2d");
   const m = Math.min(c.w, c.h);
-  if (st.style === "pixel") {
+  if (st.style === "paint") {
+    ec.fillStyle = st.color || "#000000";
+    ec.fillRect(0, 0, c.w, c.h);
+  } else if (st.style === "pixel") {
     const block = Math.max(4, Math.floor(m * st.strength / 100 * 1.5));
     const sw = Math.max(1, Math.floor(c.w / block)), sh = Math.max(1, Math.floor(c.h / block));
     const s = document.createElement("canvas"); s.width = sw; s.height = sh;
@@ -904,7 +979,8 @@ function draw() {
 
   if (!S.original && c.spots.length && c.effect) {
     const m = Math.min(c.w, c.h);
-    const feather = Math.max(3, Math.floor(m * 0.012));
+    // у краски край чёткий (как при сохранении), у блюра и пикселей — мягкий
+    const feather = S.settings.style === "paint" ? Math.max(1, Math.floor(m * 0.003)) : Math.max(3, Math.floor(m * 0.012));
     mctx.setTransform(1, 0, 0, 1, 0, 0); mctx.clearRect(0, 0, maskCv.width, maskCv.height);
     mctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     mctx.filter = `blur(${feather * sc * dpr}px)`;
@@ -1187,8 +1263,21 @@ function renderSettings() {
   const st = S.settings;
   document.querySelectorAll("#parts .chip").forEach((c) => c.classList.toggle("on", st.parts.includes(c.dataset.p)));
   document.querySelectorAll("#penisMode button").forEach((b) => b.classList.toggle("on", b.dataset.v === st.penis_mode));
-  document.querySelectorAll("#style button").forEach((b) => b.classList.toggle("on", b.dataset.v === st.style));
+  document.querySelectorAll("#style button, #startStyle button").forEach((b) => b.classList.toggle("on", b.dataset.v === st.style));
   syncSeg($("penisMode")); syncSeg($("style"));
+  const paint = st.style === "paint", col = (st.color || "#000000").toLowerCase();
+  const preset = PAINTS.find(([c]) => c === col);
+  document.querySelectorAll(".swatches").forEach((el) => {
+    el.querySelectorAll("button.sw").forEach((b) => b.classList.toggle("on", b.dataset.c === col));
+    const cu = el.querySelector(".custom"), inp = cu.querySelector("input");
+    cu.classList.toggle("on", !preset); cu.style.setProperty("--c", col);
+    if (document.activeElement !== inp) inp.value = col;
+  });
+  document.documentElement.style.setProperty("--paint", col);
+  $("vColor").textContent = preset ? preset[1] : col.toUpperCase();
+  $("colorField").classList.toggle("hidden", !paint);
+  $("startColors").classList.toggle("hidden", !paint);
+  $("strengthField").classList.toggle("hidden", paint);
   document.querySelectorAll("#engineOpts .chip").forEach((c) => c.classList.toggle("on", st[c.dataset.k] !== false));
   $("watchBar").classList.toggle("hidden", !st.watch_dir);
   $("bWatch").classList.toggle("on", !!st.watch_dir);
@@ -1206,7 +1295,7 @@ const flushSettings = debounce(() => { const p = pending; pending = {}; S.api.up
 function setSetting(patch) {
   Object.assign(S.settings, patch); Object.assign(pending, patch);
   renderSettings();
-  if ("strength" in patch || "style" in patch) { buildEffect(); draw(); }
+  if ("strength" in patch || "style" in patch || "color" in patch) { buildEffect(); draw(); }
   const spotKeys = ["parts", "penis_mode", "tip_size", "conf", "conf_genitals", "pad", "verify"];
   const it = S.cur && S.items.get(S.cur.id);
   if (it && it.edited && spotKeys.some((k) => k in patch))
@@ -1219,7 +1308,15 @@ document.querySelectorAll("#parts .chip").forEach((c) => c.onclick = () => {
   setSetting({ parts: [...set] });
 });
 document.querySelectorAll("#penisMode button").forEach((b) => b.onclick = () => setSetting({ penis_mode: b.dataset.v }));
-document.querySelectorAll("#style button").forEach((b) => b.onclick = () => setSetting({ style: b.dataset.v }));
+document.querySelectorAll("#style button, #startStyle button").forEach((b) => b.onclick = () => setSetting({ style: b.dataset.v }));
+// цвета краски: несколько готовых и свой (системная палитра)
+const PAINTS = [["#000000", "Чёрный"], ["#ffffff", "Белый"], ["#ff5fa8", "Розовый"], ["#b46cff", "Фиолетовый"], ["#3fa9ff", "Голубой"]];
+document.querySelectorAll(".swatches").forEach((el) => {
+  el.innerHTML = PAINTS.map(([c, n]) => `<button class="sw" data-c="${c}" style="--c:${c}" title="${n}"></button>`).join("") +
+    `<label class="sw custom" title="Свой цвет"><input type="color"></label>`;
+  el.querySelectorAll("button.sw").forEach((b) => b.onclick = () => setSetting({ color: b.dataset.c }));
+  el.querySelector("input").oninput = (e) => setSetting({ color: e.target.value });
+});
 document.querySelectorAll("#engineOpts .chip").forEach((c) => c.onclick = () => {
   const k = c.dataset.k, v = S.settings[k] === false;
   setSetting({ [k]: v });

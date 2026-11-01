@@ -436,14 +436,28 @@ def _merge_rects(rects):
     return rects
 
 
-def render(rgb, spots, strength=1.0, style="blur"):
+def _hex_rgb(color):
+    """'#ff5fa8' → (255, 95, 168); непонятный цвет — чёрный."""
+    c = str(color or "").lstrip("#")
+    try:
+        return tuple(int(c[i:i + 2], 16) for i in (0, 2, 4)) if len(c) == 6 else (0, 0, 0)
+    except ValueError:
+        return (0, 0, 0)
+
+
+def render(rgb, spots, strength=1.0, style="blur", color="#000000"):
     h, w = rgb.shape[:2]
     if not spots:
         return rgb
     feather = max(3, int(min(h, w) * 0.012))
     sigma = max(2.0, min(h, w) * strength / 100)
 
-    if style == "pixel":
+    if style == "paint":
+        # краска: сплошной цвет, край чёткий и только сглаженный
+        feather = max(1, int(min(h, w) * 0.003))
+        censored_full = None
+        margin = 3 * feather
+    elif style == "pixel":
         # пикселизация дешёвая, считаем на всей картинке, чтобы сетка квадратов совпадала с предпросмотром
         block = max(4, int(min(h, w) * strength / 100 * 1.5))
         small = cv2.resize(rgb, (max(1, w // block), max(1, h // block)), interpolation=cv2.INTER_LINEAR)
@@ -469,7 +483,10 @@ def render(rgb, spots, strength=1.0, style="blur"):
             cv2.ellipse(mask, (int(sp["x"]) - x0, int(sp["y"]) - y0),
                         (max(1, int(sp["rx"])), max(1, int(sp["ry"]))), float(sp.get("angle", 0)), 0, 360, 1.0, -1)
         mask = np.clip(cv2.GaussianBlur(mask, (0, 0), feather) * 1.6, 0, 1)[..., None]
-        if censored_full is not None:
+        if style == "paint":
+            censored = np.empty_like(crop)
+            censored[:] = _hex_rgb(color)
+        elif censored_full is not None:
             censored = censored_full[y0:y1, x0:x1]
         else:
             censored = cv2.GaussianBlur(crop, (0, 0), sigma)

@@ -37,7 +37,9 @@ def main():
     ap.add_argument("--conf-genitals", type=float, default=d["conf_genitals"], help="порог для гениталий 0..1")
     ap.add_argument("--pad", type=float, default=d["pad"], help="насколько расширять зону блюра (0.15 = +15%%)")
     ap.add_argument("--strength", type=float, default=d["strength"], help="сила блюра")
-    ap.add_argument("--style", choices=["blur", "pixel"], default=d["style"])
+    ap.add_argument("--style", choices=["blur", "pixel", "paint"], default=d["style"],
+                    help="blur — блюр, pixel — пиксели, paint — закрасить краской")
+    ap.add_argument("--color", default=d["color"], help="цвет краски для --style paint, например #ff5fa8")
     ap.add_argument("--debug", action="store_true", help="дополнительно сохранять картинки с рамками найденного")
     args = ap.parse_args()
 
@@ -64,7 +66,7 @@ def main():
         try:
             rgb = core.load_rgb(f)
             spots, warnings = core.make_spots(rgb, core.raw_detect(rgb), settings)
-            core.save_rgb(core.render(rgb, spots, args.strength, args.style), dst)
+            core.save_rgb(core.render(rgb, spots, args.strength, args.style, args.color), dst)
             if args.debug:
                 core.save_rgb(core.draw_debug(rgb, spots), dst.with_name(dst.stem + "_debug.png"))
             names = ", ".join(sorted({s["kind"] for s in spots})) or "-"
